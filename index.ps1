@@ -22,5 +22,5 @@ try {
 
 # Launch STA so WPF works; ecDeploy.ps1 self-elevates from there (one UAC prompt).
 # -WindowStyle Hidden keeps the host console invisible — only the WPF UI should show.
-Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden `
-    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$target`"")
+Start-Process -FilePath 'powershell.exe' `
+    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$target`"")

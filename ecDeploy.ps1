@@ -54,11 +54,11 @@ try {
 function Restart-Self {
     param([switch]$Elevated)
     if (-not $PSCommandPath) { return $false }   # running in-memory (irm|iex) — cannot relaunch
-    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`"")
     if ($Elevated) {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $argList | Out-Null
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
     } else {
-        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $argList | Out-Null
+        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null
     }
     return $true
 }
@@ -630,6 +630,14 @@ $script:UI.BtnImeLogs.Add_Click({ Open-FolderSafe $script:ImeLogsPath 'IME-logs'
 $script:UI.BtnPrograms.Add_Click({ Write-LogLine 'Åbner Programmer...'; try { Start-Process 'control.exe' -ArgumentList 'appwiz.cpl' } catch { Write-LogLine "Kunne ikke åbne Programmer: $($_.Exception.Message)" 'ERROR' } })
 $script:UI.BtnTaskMgr.Add_Click({ Write-LogLine 'Åbner Jobliste...'; try { Start-Process 'taskmgr.exe' } catch { Write-LogLine "Kunne ikke åbne Jobliste: $($_.Exception.Message)" 'ERROR' } })
 $script:UI.BtnViewLog.Add_Click({ Write-LogLine 'Åbner logfil...'; try { if (Test-Path $script:LogFile) { Start-Process 'notepad.exe' -ArgumentList "`"$($script:LogFile)`"" } else { Write-LogLine 'Logfilen findes ikke endnu' 'WARN' } } catch { Write-LogLine "Kunne ikke åbne logfil: $($_.Exception.Message)" 'ERROR' } })
+
+# Bring the window to the foreground — it launches from a hidden background process, so Windows
+# won't give it focus automatically (it would otherwise open behind the tech's terminal).
+$script:Window.Add_Loaded({
+    $this.Topmost = $true
+    [void]$this.Activate()
+    $this.Topmost = $false
+})
 
 # Confirm-on-close while No Sleep / sequence is active.
 $script:Window.Add_Closing({
