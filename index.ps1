@@ -1,22 +1,32 @@
 <#
-    index.ps1 — served at https://ecd.qwe.dk/  (primary entry point)
+    index.ps1 — bootstrapper, served at the site root (primary entry point).
 
     Usage by the technician on a freshly deployed machine:
-        irm ecd.qwe.dk | iex
+        irm ecd.qwe.dk    | iex     (public)
+        irm ecd.palme3.dk | iex     (internal mirror)
 
     Pulls the real app to disk (so it can self-elevate / run STA) and launches it.
     Keep this tiny — it's piped straight into iex.
 #>
 
 $ErrorActionPreference = 'Stop'
-$base   = 'https://ecd.qwe.dk'
-$target = Join-Path $env:TEMP 'ecDeploy.ps1'
 
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri "$base/ecDeploy.ps1" -OutFile $target -UseBasicParsing
-} catch {
-    Write-Host "Kunne ikke hente ecDeploy: $($_.Exception.Message)" -ForegroundColor Red
+# Download ecDeploy.ps1 from whichever host is reachable — public first, internal http fallback —
+# so the same one-liner works from either entry point.
+$hosts  = @('https://ecd.qwe.dk', 'http://ecd.palme3.dk')
+$target = Join-Path $env:TEMP 'ecDeploy.ps1'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$ok = $false
+foreach ($h in $hosts) {
+    try {
+        Invoke-WebRequest -Uri "$h/ecDeploy.ps1" -OutFile $target -UseBasicParsing
+        $ok = $true
+        break
+    } catch { }
+}
+if (-not $ok) {
+    Write-Host "Kunne ikke hente ecDeploy fra nogen kendt host." -ForegroundColor Red
     return
 }
 
