@@ -35,6 +35,17 @@ trap {
     break
 }
 
+# Hide our own console window — the WPF UI is the only thing the tech should see. The launchers
+# also pass -WindowStyle Hidden; this is the reliable belt-and-suspenders (and covers direct runs).
+try {
+    Add-Type -Name EcWin -Namespace Ec -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+'@ -ErrorAction SilentlyContinue
+    $__console = [Ec.EcWin]::GetConsoleWindow()
+    if ($__console -ne [System.IntPtr]::Zero) { [void][Ec.EcWin]::ShowWindow($__console, 0) }  # 0 = SW_HIDE
+} catch {}
+
 #region ---------------------------------------------------------- bootstrap: STA + elevation
 # WPF requires an STA thread; the privileged actions require an elevated process.
 # The bootstrap normally launches us -STA already, and we self-elevate here with one UAC prompt.
@@ -45,9 +56,9 @@ function Restart-Self {
     if (-not $PSCommandPath) { return $false }   # running in-memory (irm|iex) — cannot relaunch
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-File', "`"$PSCommandPath`"")
     if ($Elevated) {
-        Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
+        Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $argList | Out-Null
     } else {
-        Start-Process -FilePath 'powershell.exe' -ArgumentList $argList | Out-Null
+        Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList $argList | Out-Null
     }
     return $true
 }
