@@ -1,4 +1,4 @@
-﻿<#
+<#
     index.ps1 — served at https://ecd.qwe.dk/  (primary entry point)
 
     Usage by the technician on a freshly deployed machine:
