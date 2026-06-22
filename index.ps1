@@ -20,7 +20,7 @@ $target = Join-Path $env:TEMP 'ecDeploy.ps1'
 $ok = $false
 foreach ($h in $hosts) {
     try {
-        Invoke-WebRequest -Uri "$h/ecDeploy.ps1" -OutFile $target -UseBasicParsing
+        Invoke-WebRequest -Uri "$h/ecDeploy.ps1" -OutFile $target -UseBasicParsing -TimeoutSec 20
         $ok = $true
         break
     } catch { }
