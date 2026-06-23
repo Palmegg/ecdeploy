@@ -256,6 +256,7 @@ $xaml = @'
                         <Button x:Name="NavAuto"    Style="{StaticResource NavButton}" Content="Automatisk sekvens"/>
                         <Button x:Name="NavNoSleep" Style="{StaticResource NavButton}" Content="No Sleep"/>
                         <Button x:Name="NavGrs"     Style="{StaticResource NavButton}" Content="Opdater GRS"/>
+                        <Button x:Name="NavIme"     Style="{StaticResource NavButton}" Content="Genstart IME"/>
                         <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
                         <TextBlock Text="VÆRKTØJER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
                         <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
@@ -317,6 +318,16 @@ $xaml = @'
                         <TextBlock x:Name="TxtGrsStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
                         <Button x:Name="BtnRunGrs" Style="{StaticResource PrimaryButton}" Content="Opdater GRS nu" HorizontalAlignment="Left"/>
                     </StackPanel>
+
+                    <!-- IME restart -->
+                    <StackPanel x:Name="PanelIme" Visibility="Collapsed">
+                        <TextBlock Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12"
+                                   Text="Genstarter Intune Management Extension-tjenesten (IME) — bruges til hurtigt at få Intune til at genoptage app-installationer."/>
+                        <TextBlock Foreground="#F4B36A" TextWrapping="Wrap" Margin="0,0,0,14"
+                                   Text="Bemærk: undgå at genstarte midt i en igangværende installation."/>
+                        <TextBlock x:Name="TxtImeStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
+                        <Button x:Name="BtnRunIme" Style="{StaticResource PrimaryButton}" Content="Genstart IME nu" HorizontalAlignment="Left"/>
+                    </StackPanel>
                 </Grid>
 
                 <!-- Live log -->
@@ -345,7 +356,7 @@ foreach ($name in @(
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
-    'TxtGrsStatus','BtnRunGrs','LogBox'
+    'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme','LogBox'
 )) { $script:UI[$name] = $script:Window.FindName($name) }
 
 $script:UI.TxtVersion.Text = "v$script:Version"
@@ -543,6 +554,51 @@ function Invoke-GrsRefresh {
 }
 #endregion
 
+#region ---------------------------------------------------------- IME restart
+# Returns a hashtable: @{ Restarted; Missing }
+$script:ImeRestartWork = {
+    $Queue.Enqueue('Genstart af IME startet')
+    $res = @{ Restarted = $false; Missing = $false }
+    $svc = Get-Service -Name 'IntuneManagementExtension' -ErrorAction SilentlyContinue
+    if (-not $svc) { $svc = Get-Service -DisplayName '*Intune Management Extension*' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if (-not $svc) {
+        $Queue.Enqueue('IME-tjenesten findes ikke på denne maskine')
+        $res.Missing = $true
+    } else {
+        try {
+            Restart-Service -InputObject $svc -Force -ErrorAction Stop
+            $res.Restarted = $true
+            $Queue.Enqueue('IME-tjenesten genstartet')
+        } catch {
+            $Queue.Enqueue("FEJL ved genstart af IME: $($_.Exception.Message)")
+        }
+    }
+    return $res
+}
+
+function Invoke-ImeRestart {
+    if (-not $script:IsAdmin) {
+        $script:UI.TxtImeStatus.Text = 'Kræver administrator. Genstart ecDeploy som administrator.'
+        Write-LogLine 'Genstart IME afvist: ikke administrator' 'WARN'
+        return
+    }
+    $script:UI.BtnRunIme.IsEnabled = $false
+    $script:UI.TxtImeStatus.Text = 'Genstarter IME...'
+
+    Start-BackgroundWork -Work $script:ImeRestartWork -OnComplete {
+        param($res)
+        if ($res -is [hashtable] -and $res.Restarted) {
+            $script:UI.TxtImeStatus.Text = "Færdig: IME-tjenesten genstartet kl. $((Get-Date).ToString('HH:mm'))"
+        } elseif ($res -is [hashtable] -and $res.Missing) {
+            $script:UI.TxtImeStatus.Text = 'IME-tjenesten findes ikke på denne maskine.'
+        } else {
+            $script:UI.TxtImeStatus.Text = 'Genstart fejlede (se log).'
+        }
+        if (-not $script:SeqRunning) { $script:UI.BtnRunIme.IsEnabled = $true }
+    }
+}
+#endregion
+
 #region ---------------------------------------------------------- Automatic sequence
 function Update-SequenceControls {
     $running = $script:SeqRunning
@@ -552,9 +608,11 @@ function Update-SequenceControls {
     # While the sequence owns No Sleep + GRS, disable the manual controls.
     $script:UI.BtnToggleNoSleep.IsEnabled = -not $running
     $script:UI.BtnRunGrs.IsEnabled = (-not $running) -and $script:IsAdmin
+    $script:UI.BtnRunIme.IsEnabled = (-not $running) -and $script:IsAdmin
     if ($running) {
         $script:UI.TxtNoSleepStatus.Text = 'Styret af den automatiske sekvens.'
         $script:UI.TxtGrsStatus.Text = 'Styret af den automatiske sekvens.'
+        $script:UI.TxtImeStatus.Text = 'Styret af den automatiske sekvens.'
     }
 }
 
@@ -617,7 +675,7 @@ function Stop-AutoSequence {
 #region ---------------------------------------------------------- navigation + tools
 function Show-Panel {
     param([string]$Name, [string]$Title)
-    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs') {
+    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs','PanelIme') {
         $script:UI[$p].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' }
     }
     $script:UI.TxtPanelTitle.Text = $Title
@@ -638,6 +696,7 @@ function Open-FolderSafe {
 $script:UI.NavAuto.Add_Click(    { Show-Panel 'PanelAuto'    'Automatisk sekvens' })
 $script:UI.NavNoSleep.Add_Click( { Show-Panel 'PanelNoSleep' 'No Sleep' })
 $script:UI.NavGrs.Add_Click(     { Show-Panel 'PanelGrs'     'Opdater GRS' })
+$script:UI.NavIme.Add_Click(     { Show-Panel 'PanelIme'     'Genstart IME' })
 
 $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
@@ -648,6 +707,13 @@ $script:UI.BtnRunGrs.Add_Click({
         'Dette rydder GRS og genstarter IME-tjenesten. Undgå at køre det midt i en installation. Fortsæt?',
         'Opdater GRS', 'YesNo', 'Warning')
     if ($answer -eq 'Yes') { Invoke-GrsRefresh }
+})
+
+$script:UI.BtnRunIme.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        'Dette genstarter IME-tjenesten. Undgå at køre det midt i en installation. Fortsæt?',
+        'Genstart IME', 'YesNo', 'Warning')
+    if ($answer -eq 'Yes') { Invoke-ImeRestart }
 })
 
 $script:UI.BtnImeLogs.Add_Click({ Open-FolderSafe $script:ImeLogsPath 'IME-logs' })
