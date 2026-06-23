@@ -119,6 +119,7 @@ try {
 #region ---------------------------------------------------------- paths + state
 $script:Win32AppsKey = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
 $script:ImeLogsPath  = Join-Path $env:ProgramData 'Microsoft\IntuneManagementExtension\Logs'
+$script:ImeLogFile   = Join-Path $script:ImeLogsPath 'IntuneManagementExtension.log'
 $script:LogDir       = Join-Path $env:ProgramData 'ecDeploy'
 $script:LogFile      = Join-Path $script:LogDir 'ecDeploy.log'
 
@@ -135,7 +136,7 @@ try { if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ecDeploy" Height="600" Width="860"
+        Title="ecDeploy" Height="680" Width="860"
         WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize"
         Background="#15161A" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
     <Window.Resources>
@@ -258,6 +259,11 @@ $xaml = @'
                         <Button x:Name="NavGrs"     Style="{StaticResource NavButton}" Content="Opdater GRS"/>
                         <Button x:Name="NavIme"     Style="{StaticResource NavButton}" Content="Genstart IME"/>
                         <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
+                        <TextBlock Text="DIAGNOSTIK" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
+                        <Button x:Name="NavApps"    Style="{StaticResource NavButton}" Content="App-status"/>
+                        <Button x:Name="NavImeLog"  Style="{StaticResource NavButton}" Content="Live IME-log"/>
+                        <Button x:Name="NavInfo"    Style="{StaticResource NavButton}" Content="Enheds-info"/>
+                        <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
                         <TextBlock Text="VÆRKTØJER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
                         <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
                         <Button x:Name="BtnPrograms" Style="{StaticResource NavButton}" Content="Programmer"/>
@@ -328,6 +334,46 @@ $xaml = @'
                         <TextBlock x:Name="TxtImeStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
                         <Button x:Name="BtnRunIme" Style="{StaticResource PrimaryButton}" Content="Genstart IME nu" HorizontalAlignment="Left"/>
                     </StackPanel>
+
+                    <!-- App status -->
+                    <StackPanel x:Name="PanelApps" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <Button x:Name="BtnAppsRefresh" Style="{StaticResource GhostButton}" Content="Opdater"/>
+                            <TextBlock x:Name="TxtAppsSummary" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="14,0,0,0"/>
+                        </StackPanel>
+                        <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6">
+                            <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                                <StackPanel x:Name="AppsList" Margin="8"/>
+                            </ScrollViewer>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Live IME log -->
+                    <StackPanel x:Name="PanelImeLog" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <CheckBox x:Name="ChkImeErrorsOnly" Foreground="{StaticResource Text}" Content="Kun fejl/advarsler" VerticalAlignment="Center"/>
+                            <Button x:Name="BtnImeLogRefresh" Style="{StaticResource GhostButton}" Content="Opdater" Margin="16,0,0,0"/>
+                            <TextBlock x:Name="TxtImeLogStatus" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="16,0,0,0"/>
+                        </StackPanel>
+                        <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6">
+                            <TextBox x:Name="ImeLogBox" Height="280" Margin="8" Background="Transparent" Foreground="#C8CBD2"
+                                     BorderThickness="0" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
+                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
+                        </Border>
+                    </StackPanel>
+
+                    <!-- Device info + diagnostics -->
+                    <StackPanel x:Name="PanelInfo" Visibility="Collapsed">
+                        <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6" Margin="0,0,0,12">
+                            <TextBox x:Name="InfoBox" Height="250" Margin="8" Background="Transparent" Foreground="#C8CBD2"
+                                     BorderThickness="0" IsReadOnly="True" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"/>
+                        </Border>
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="BtnInfoRefresh" Style="{StaticResource GhostButton}" Content="Opdater"/>
+                            <Button x:Name="BtnDiag" Style="{StaticResource PrimaryButton}" Content="Saml diagnostik (.cab)" Margin="10,0,0,0"/>
+                        </StackPanel>
+                        <TextBlock x:Name="TxtInfoStatus" Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                    </StackPanel>
                 </Grid>
 
                 <!-- Live log -->
@@ -356,7 +402,10 @@ foreach ($name in @(
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
-    'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme','LogBox'
+    'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme',
+    'NavApps','PanelApps','BtnAppsRefresh','TxtAppsSummary','AppsList',
+    'NavImeLog','PanelImeLog','ChkImeErrorsOnly','BtnImeLogRefresh','TxtImeLogStatus','ImeLogBox',
+    'NavInfo','PanelInfo','InfoBox','BtnInfoRefresh','BtnDiag','TxtInfoStatus','LogBox'
 )) { $script:UI[$name] = $script:Window.FindName($name) }
 
 $script:UI.TxtVersion.Text = "v$script:Version"
@@ -599,6 +648,149 @@ function Invoke-ImeRestart {
 }
 #endregion
 
+#region ---------------------------------------------------------- diagnostics: apps / IME log / device info
+# Enumerate Intune Win32 app enforcement states from the registry. Best-effort: state codes are
+# mapped to Installed/Failed/Pending; app ids are GUIDs (friendly names aren't in the registry).
+$script:AppStatusWork = {
+    $base = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
+    $res = @{ Apps = @(); Installed = 0; Failed = 0; Pending = 0; Unknown = 0; Note = '' }
+    if (-not (Test-Path $base)) { $res.Note = 'Win32Apps-nøglen findes ikke (maskinen er måske ikke Intune-managed endnu).'; return $res }
+    $skip = @('GRS','Reporting','OperationalState','GRSStore')
+    foreach ($ctx in (Get-ChildItem $base -ErrorAction SilentlyContinue)) {
+        if ($skip -contains $ctx.PSChildName) { continue }
+        foreach ($app in (Get-ChildItem $ctx.PSPath -ErrorAction SilentlyContinue)) {
+            $esm = $null
+            $p = Get-ItemProperty $app.PSPath -ErrorAction SilentlyContinue
+            if ($p -and ($p.PSObject.Properties.Name -contains 'EnforcementStateMessage')) { $esm = $p.EnforcementStateMessage }
+            if (-not $esm) {
+                foreach ($sub in (Get-ChildItem $app.PSPath -ErrorAction SilentlyContinue)) {
+                    $ps = Get-ItemProperty $sub.PSPath -ErrorAction SilentlyContinue
+                    if ($ps -and ($ps.PSObject.Properties.Name -contains 'EnforcementStateMessage')) { $esm = $ps.EnforcementStateMessage; break }
+                }
+            }
+            $code = $null; $err = $null
+            if ($esm) { try { $j = $esm | ConvertFrom-Json; $code = $j.EnforcementState; $err = $j.ErrorCode } catch {} }
+            $cat = 'Unknown'; $label = 'Ukendt'
+            if ($null -ne $code) {
+                $n = [int]$code
+                if ($n -eq 1000 -or $n -eq 1003) { $cat = 'Installed'; $label = 'Installeret' }
+                elseif ($n -ge 3000) { $cat = 'Failed'; $label = 'Fejlet' }
+                elseif ($n -ge 2000) { $cat = 'Pending'; $label = 'I gang' }
+                else { $label = "Kode $n" }
+            }
+            switch ($cat) { 'Installed' { $res.Installed++ } 'Failed' { $res.Failed++ } 'Pending' { $res.Pending++ } default { $res.Unknown++ } }
+            $res.Apps += [pscustomobject]@{ Id = $app.PSChildName; Label = $label; Cat = $cat; Code = $code; Err = $err }
+        }
+    }
+    return $res
+}
+
+function Update-AppStatus {
+    $script:UI.AppsList.Children.Clear()
+    $script:UI.TxtAppsSummary.Text = 'Indlæser...'
+    Start-BackgroundWork -Work $script:AppStatusWork -OnComplete {
+        param($res)
+        $script:UI.AppsList.Children.Clear()
+        if (-not ($res -is [hashtable])) { $script:UI.TxtAppsSummary.Text = 'Fejl (se log).'; return }
+        if ($res.Note) { $script:UI.TxtAppsSummary.Text = $res.Note; return }
+        if ($res.Apps.Count -eq 0) { $script:UI.TxtAppsSummary.Text = 'Ingen Win32-apps fundet.'; return }
+        $script:UI.TxtAppsSummary.Text = ('{0} installeret · {1} fejlet · {2} i gang · {3} ukendt' -f $res.Installed, $res.Failed, $res.Pending, $res.Unknown)
+        $colors = @{ Installed = '#22C55E'; Failed = '#EF4444'; Pending = '#F59E0B'; Unknown = '#9AA0AA' }
+        $order = @{ Failed = 0; Pending = 1; Unknown = 2; Installed = 3 }
+        foreach ($a in ($res.Apps | Sort-Object @{ Expression = { $order[$_.Cat] } })) {
+            $row = New-Object System.Windows.Controls.DockPanel
+            $row.Margin = '0,2'
+            $chip = New-Object System.Windows.Controls.TextBlock
+            $chip.Text = $a.Label; $chip.Width = 90; $chip.Foreground = $colors[$a.Cat]
+            $id = New-Object System.Windows.Controls.TextBlock
+            $id.Text = $a.Id + $(if ($null -ne $a.Err -and $a.Err -ne 0) { "   fejlkode: $($a.Err)" } else { '' })
+            $id.Foreground = '#C8CBD2'; $id.FontFamily = 'Consolas'; $id.FontSize = 11
+            [void]$row.Children.Add($chip); [void]$row.Children.Add($id)
+            [void]$script:UI.AppsList.Children.Add($row)
+        }
+    }
+}
+
+# Read the tail of the IME log (shared read so it works while IME has it open).
+function Read-ImeLogTail {
+    param([int]$Lines = 250, [bool]$ErrorsOnly = $false)
+    if (-not (Test-Path $script:ImeLogFile)) { return 'IME-loggen findes ikke på denne maskine.' }
+    try {
+        $fs = [System.IO.File]::Open($script:ImeLogFile, 'Open', 'Read', 'ReadWrite')
+        $sr = New-Object System.IO.StreamReader($fs)
+        $text = $sr.ReadToEnd(); $sr.Close(); $fs.Close()
+    } catch { return "Kunne ikke læse IME-loggen: $($_.Exception.Message)" }
+    $arr = $text -split "`r?`n"
+    if ($ErrorsOnly) { $arr = @($arr | Where-Object { $_ -match '(?i)error|fail|exception|warning' }) }
+    return (($arr | Select-Object -Last $Lines) -join "`r`n")
+}
+
+function Update-ImeLog {
+    $script:UI.ImeLogBox.Text = Read-ImeLogTail -ErrorsOnly ([bool]$script:UI.ChkImeErrorsOnly.IsChecked)
+    $script:UI.ImeLogBox.ScrollToEnd()
+    $script:UI.TxtImeLogStatus.Text = "Opdateret kl. $((Get-Date).ToString('HH:mm:ss'))"
+}
+
+# Device info (WMI + dsregcmd) gathered on a background runspace.
+$script:DeviceInfoWork = {
+    $lines = @()
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $lines += "Computernavn : $env:COMPUTERNAME"
+    $lines += "Bruger       : $env:USERNAME"
+    if ($cs)   { $lines += "Producent    : $($cs.Manufacturer)"; $lines += "Model        : $($cs.Model)" }
+    if ($bios) { $lines += "Serienummer  : $($bios.SerialNumber)" }
+    if ($os)   { $lines += "OS           : $($os.Caption)" }
+    try {
+        $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
+        if ($cv) { $lines += "Build        : $($cv.DisplayVersion) ($($cv.CurrentBuild).$($cv.UBR))" }
+    } catch {}
+    try {
+        $ds = & dsregcmd /status 2>$null
+        foreach ($k in 'AzureAdJoined', 'DomainJoined', 'TenantName', 'DeviceId') {
+            $m = $ds | Select-String -Pattern ("\b{0}\s*:\s*(.+)$" -f $k)
+            if ($m) { $lines += ('{0,-12} : {1}' -f $k, $m.Matches[0].Groups[1].Value.Trim()) }
+        }
+    } catch {}
+    return ($lines -join "`r`n")
+}
+
+function Update-DeviceInfo {
+    $script:UI.InfoBox.Text = 'Indlæser...'
+    Start-BackgroundWork -Work $script:DeviceInfoWork -OnComplete { param($txt) $script:UI.InfoBox.Text = [string]$txt }
+}
+
+# Collect an MDM diagnostics .cab for escalation.
+$script:DiagWork = {
+    $out = Join-Path $env:TEMP 'ecDeploy-MDMDiag.cab'
+    $tool = Join-Path $env:WINDIR 'system32\mdmdiagnosticstool.exe'
+    if (-not (Test-Path $tool)) { $Queue.Enqueue('mdmdiagnosticstool.exe findes ikke på denne maskine'); return @{ Ok = $false; Path = $null } }
+    $Queue.Enqueue('Samler MDM-diagnostik...')
+    try {
+        & $tool -area 'Autopilot;DeviceEnrollment;DeviceProvisioning;TPM' -cab $out 2>&1 | Out-Null
+        if (Test-Path $out) { $Queue.Enqueue("Diagnostik gemt: $out"); return @{ Ok = $true; Path = $out } }
+        $Queue.Enqueue('Diagnostik-cab blev ikke oprettet')
+    } catch { $Queue.Enqueue("FEJL ved diagnostik: $($_.Exception.Message)") }
+    return @{ Ok = $false; Path = $null }
+}
+
+function Invoke-Diagnostics {
+    $script:UI.BtnDiag.IsEnabled = $false
+    $script:UI.TxtInfoStatus.Text = 'Samler diagnostik (kan tage et øjeblik)...'
+    Start-BackgroundWork -Work $script:DiagWork -OnComplete {
+        param($res)
+        $script:UI.BtnDiag.IsEnabled = $true
+        if ($res -is [hashtable] -and $res.Ok) {
+            $script:UI.TxtInfoStatus.Text = "Diagnostik gemt: $($res.Path)"
+            try { Start-Process 'explorer.exe' -ArgumentList "/select,`"$($res.Path)`"" } catch {}
+        } else {
+            $script:UI.TxtInfoStatus.Text = 'Kunne ikke samle diagnostik (se log).'
+        }
+    }
+}
+#endregion
+
 #region ---------------------------------------------------------- Automatic sequence
 function Update-SequenceControls {
     $running = $script:SeqRunning
@@ -675,10 +867,16 @@ function Stop-AutoSequence {
 #region ---------------------------------------------------------- navigation + tools
 function Show-Panel {
     param([string]$Name, [string]$Title)
-    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs','PanelIme') {
+    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs','PanelIme','PanelApps','PanelImeLog','PanelInfo') {
         $script:UI[$p].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' }
     }
     $script:UI.TxtPanelTitle.Text = $Title
+
+    # Load/refresh diagnostics panels when shown; run the IME-log auto-refresh only while visible.
+    if ($Name -eq 'PanelImeLog') { Update-ImeLog; if ($script:ImeLogTimer) { $script:ImeLogTimer.Start() } }
+    elseif ($script:ImeLogTimer) { $script:ImeLogTimer.Stop() }
+    if ($Name -eq 'PanelApps') { Update-AppStatus }
+    if ($Name -eq 'PanelInfo') { Update-DeviceInfo }
 }
 
 function Open-FolderSafe {
@@ -697,6 +895,15 @@ $script:UI.NavAuto.Add_Click(    { Show-Panel 'PanelAuto'    'Automatisk sekvens
 $script:UI.NavNoSleep.Add_Click( { Show-Panel 'PanelNoSleep' 'No Sleep' })
 $script:UI.NavGrs.Add_Click(     { Show-Panel 'PanelGrs'     'Opdater GRS' })
 $script:UI.NavIme.Add_Click(     { Show-Panel 'PanelIme'     'Genstart IME' })
+$script:UI.NavApps.Add_Click(    { Show-Panel 'PanelApps'    'App-status' })
+$script:UI.NavImeLog.Add_Click(  { Show-Panel 'PanelImeLog'  'Live IME-log' })
+$script:UI.NavInfo.Add_Click(    { Show-Panel 'PanelInfo'    'Enheds-info' })
+
+$script:UI.BtnAppsRefresh.Add_Click({ Update-AppStatus })
+$script:UI.BtnImeLogRefresh.Add_Click({ Update-ImeLog })
+$script:UI.ChkImeErrorsOnly.Add_Click({ Update-ImeLog })
+$script:UI.BtnInfoRefresh.Add_Click({ Update-DeviceInfo })
+$script:UI.BtnDiag.Add_Click({ Invoke-Diagnostics })
 
 $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
@@ -750,6 +957,11 @@ Write-LogLine "ecDeploy v$script:Version startet"
 if ($script:IsAdmin) { Write-LogLine 'Kører som administrator' }
 else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger er deaktiveret' 'WARN' }
 Update-SequenceControls
+
+# Timer that refreshes the live IME-log view (started only while that panel is visible).
+$script:ImeLogTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:ImeLogTimer.Interval = [TimeSpan]::FromSeconds(3)
+$script:ImeLogTimer.Add_Tick({ Update-ImeLog })
 
 # Async connectivity check for the Online chip.
 Start-BackgroundWork -Work {
