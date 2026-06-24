@@ -1121,7 +1121,7 @@ function Start-CedraFlow {
     Update-Chips
     Show-Panel 'PanelAuto' $(if ($script:Profile) { $script:Profile.Brand } else { 'CedraDeploy' })
     $script:UI.BtnStartAuto.IsEnabled = $false
-    $script:UI.BtnStopAuto.IsEnabled = $false
+    $script:UI.BtnStopAuto.IsEnabled = $true     # let the tech abort the Cedra flow
     $script:UI.TxtAutoMinutes.IsEnabled = $false
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
@@ -1152,6 +1152,17 @@ function Start-CedraFlow {
         })
     }
     $script:CedraTimer.Start()
+}
+
+function Stop-CedraFlow {
+    if ($script:CedraTimer) { $script:CedraTimer.Stop() }
+    $script:CedraRunning = $false
+    Set-KeepAwake $false
+    $script:UI.BarAuto.Value = 0
+    $script:UI.TxtAutoStatus.Text = 'CedraDeploy stoppet.'
+    Write-LogLine 'CedraDeploy stoppet af tekniker'
+    Update-Chips
+    Update-SequenceControls   # back to an idle, usable Auto panel
 }
 
 # CedraResume: runs at the next logon (via the scheduled task) — anti-sleep only + Windows Update.
@@ -1284,7 +1295,7 @@ $script:UI.BtnDiag.Add_Click({ Invoke-Diagnostics })
 
 $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
-$script:UI.BtnStopAuto.Add_Click({ Stop-AutoSequence })
+$script:UI.BtnStopAuto.Add_Click({ if ($script:CedraRunning) { Stop-CedraFlow } else { Stop-AutoSequence } })
 
 $script:UI.BtnRunGrs.Add_Click({
     $answer = [System.Windows.MessageBox]::Show(
