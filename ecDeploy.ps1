@@ -6,7 +6,11 @@
 
     See DESIGN.md for the full design. Next-gen rebuild of SpeedTune.
     User-facing text is Danish; code/identifiers/comments are English.
+
+    -AutoSequence : start the automatic sequence immediately on launch (preserved across the
+    self-elevation relaunch). The bootstrap adds it when $env:ECDEPLOY_AUTOSEQUENCE is set.
 #>
+param([switch]$AutoSequence)
 
 $ErrorActionPreference = 'Stop'
 $script:Version = '1.0.0'
@@ -55,6 +59,7 @@ function Restart-Self {
     param([switch]$Elevated)
     if (-not $PSCommandPath) { return $false }   # running in-memory (irm|iex) — cannot relaunch
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$PSCommandPath`"")
+    if ($AutoSequence) { $argList += '-AutoSequence' }   # preserve auto-start across the relaunch
     if ($Elevated) {
         Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $argList | Out-Null
     } else {
@@ -126,6 +131,7 @@ $script:LogFile      = Join-Path $script:LogDir 'ecDeploy.log'
 $script:NoSleepActive = $false
 $script:SeqRunning    = $false
 $script:SeqGrsFired   = $false
+$script:AutoStart     = [bool]$AutoSequence   # auto-start the sequence once the window is loaded
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -1061,6 +1067,12 @@ $script:Window.Add_Loaded({
     $this.Topmost = $true
     [void]$this.Activate()
     $this.Topmost = $false
+    # -AutoSequence: jump to the Automatic sequence panel and start it right away.
+    if ($script:AutoStart) {
+        Show-Panel 'PanelAuto' 'Automatisk sekvens'
+        Write-LogLine 'Auto-start: starter automatisk sekvens'
+        Start-AutoSequence
+    }
 })
 
 # Confirm-on-close while No Sleep / sequence is active.

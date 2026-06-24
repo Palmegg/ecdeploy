@@ -5,6 +5,9 @@
         irm ecd.qwe.dk    | iex     (public)
         irm ecd.palme3.dk | iex     (internal mirror)
 
+    Auto-start the automatic sequence:
+        $env:ECDEPLOY_AUTOSEQUENCE=1; irm ecd.qwe.dk | iex
+
     Pulls the real app to disk (so it can self-elevate / run STA) and launches it.
     Keep this tiny — it's piped straight into iex.
 #>
@@ -32,5 +35,6 @@ if (-not $ok) {
 
 # Launch STA so WPF works; ecDeploy.ps1 self-elevates from there (one UAC prompt).
 # -WindowStyle Hidden keeps the host console invisible — only the WPF UI should show.
-Start-Process -FilePath 'powershell.exe' `
-    -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$target`"")
+$psArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-STA', '-WindowStyle', 'Hidden', '-File', "`"$target`"")
+if ($env:ECDEPLOY_AUTOSEQUENCE) { $psArgs += '-AutoSequence' }   # honour the auto-start env flag
+Start-Process -FilePath 'powershell.exe' -ArgumentList $psArgs

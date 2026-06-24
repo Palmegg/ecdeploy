@@ -25,8 +25,13 @@ if errorlevel 1 (
     goto :end
 )
 
+:: Autostart af den automatiske sekvens via env-flag (ECDEPLOY_AUTOSEQUENCE=1) eller "auto"-argument.
+set "AUTO="
+if defined ECDEPLOY_AUTOSEQUENCE set "AUTO=-AutoSequence"
+if /I "%~1"=="auto" set "AUTO=-AutoSequence"
+
 :: -STA er paakraevet for WPF. ecDeploy self-elevater selv ( et enkelt UAC-prompt).
-powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%downloadPath%"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%downloadPath%" %AUTO%
 
 :end
 endlocal
