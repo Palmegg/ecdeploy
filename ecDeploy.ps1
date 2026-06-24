@@ -153,6 +153,7 @@ $script:Customers = @{
         Wordmark    = 'CedraDanmark'
         DevelopedBy = 'Developed by Jonas Palme'
         Accent      = '#14B8A6'
+        AccentHover = '#0D9488'
         LogoB64     = $script:CedraLogoB64
     }
 }
@@ -187,7 +188,8 @@ $xaml = @'
         WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
         Background="#15161A" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
     <Window.Resources>
-        <SolidColorBrush x:Key="Accent" Color="#3B82F6"/>
+        <SolidColorBrush x:Key="Accent"      Color="#3B82F6"/>
+        <SolidColorBrush x:Key="AccentHover" Color="#2F6FE0"/>
         <SolidColorBrush x:Key="Panel"  Color="#232429"/>
         <SolidColorBrush x:Key="Text"   Color="#E6E7EA"/>
         <SolidColorBrush x:Key="Muted"  Color="#9AA0AA"/>
@@ -219,7 +221,7 @@ $xaml = @'
 
         <Style x:Key="PrimaryButton" TargetType="Button">
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background" Value="#3B82F6"/>
+            <Setter Property="Background" Value="{DynamicResource Accent}"/>
             <Setter Property="Padding" Value="18,9"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor" Value="Hand"/>
@@ -232,7 +234,7 @@ $xaml = @'
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="#2F6FE0"/></Trigger>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="b" Property="Background" Value="{DynamicResource AccentHover}"/></Trigger>
                             <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -349,7 +351,7 @@ $xaml = @'
                             <TextBlock Text="Nedtælling (minutter):" Foreground="{StaticResource Text}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                             <TextBox x:Name="TxtAutoMinutes" Text="45" Width="60" Background="#15161A" Foreground="#E6E7EA" BorderBrush="#3A3B43" Padding="6,4"/>
                         </StackPanel>
-                        <ProgressBar x:Name="BarAuto" Height="8" Minimum="0" Maximum="100" Value="0" Background="#15161A" Foreground="#3B82F6" BorderThickness="0" Margin="0,0,0,10"/>
+                        <ProgressBar x:Name="BarAuto" Height="8" Minimum="0" Maximum="100" Value="0" Background="#15161A" Foreground="{DynamicResource Accent}" BorderThickness="0" Margin="0,0,0,10"/>
                         <TextBlock x:Name="TxtAutoStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
                         <StackPanel Orientation="Horizontal">
                             <Button x:Name="BtnStartAuto" Style="{StaticResource PrimaryButton}" Content="Start sekvens"/>
@@ -477,6 +479,14 @@ if ($script:Profile) {
     }
     $custImg = ConvertFrom-B64Image $script:Profile.LogoB64
     if ($custImg) { $script:Window.Icon = $custImg; $script:UI.LogoImg.Source = $custImg }
+    # Recolour the accent (buttons, progress bars use DynamicResource Accent/AccentHover).
+    # Separate try blocks so a DynamicResource update side-effect on one can't skip the other.
+    if ($script:Profile.AccentHover) {
+        try { $script:Window.Resources['AccentHover'] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.AccentHover)) } catch {}
+    }
+    if ($script:Profile.Accent) {
+        try { $script:Window.Resources['Accent'] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.Accent)) } catch {}
+    }
 }
 #endregion
 
