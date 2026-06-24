@@ -136,8 +136,8 @@ try { if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ecDeploy" Height="680" Width="860"
-        WindowStartupLocation="CenterScreen" ResizeMode="CanMinimize"
+        Title="ecDeploy" Height="700" Width="880" MinHeight="600" MinWidth="800"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
         Background="#15161A" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
     <Window.Resources>
         <SolidColorBrush x:Key="Accent" Color="#3B82F6"/>
@@ -268,6 +268,7 @@ $xaml = @'
                         <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
                         <Button x:Name="BtnPrograms" Style="{StaticResource NavButton}" Content="Programmer"/>
                         <Button x:Name="BtnTaskMgr"  Style="{StaticResource NavButton}" Content="Jobliste"/>
+                        <Button x:Name="BtnWuOpen"   Style="{StaticResource NavButton}" Content="Windows Update"/>
                     </StackPanel>
                     <Button x:Name="BtnViewLog" DockPanel.Dock="Bottom" Style="{StaticResource NavButton}" Content="Vis logfil" VerticalAlignment="Bottom"/>
                 </DockPanel>
@@ -405,7 +406,7 @@ foreach ($name in @(
     'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme',
     'NavApps','PanelApps','BtnAppsRefresh','TxtAppsSummary','AppsList',
     'NavImeLog','PanelImeLog','ChkImeErrorsOnly','BtnImeLogRefresh','TxtImeLogStatus','ImeLogBox',
-    'NavInfo','PanelInfo','InfoBox','BtnInfoRefresh','BtnDiag','TxtInfoStatus','LogBox'
+    'NavInfo','PanelInfo','InfoBox','BtnInfoRefresh','BtnDiag','TxtInfoStatus','BtnWuOpen','LogBox'
 )) { $script:UI[$name] = $script:Window.FindName($name) }
 
 $script:UI.TxtVersion.Text = "v$script:Version"
@@ -791,6 +792,130 @@ function Invoke-Diagnostics {
 }
 #endregion
 
+#region ---------------------------------------------------------- Windows Update status (companion window)
+# A separate WPF window showing Windows Update status, opened automatically by the automatic
+# sequence (and manually via the Windows Update tool button). Reads state via the Windows Update
+# Agent COM API — it only *observes*; the actual updates are driven elsewhere (e.g. the unattend XML).
+$script:WuWindow = $null
+$script:WuTimer  = $null
+
+$script:WuXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Windows Update — status" Height="540" Width="600" MinHeight="360" MinWidth="460"
+        WindowStartupLocation="CenterScreen" Background="#15161A" FontFamily="Segoe UI" FontSize="13">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="#1C1D22" BorderBrush="#2E2F36" BorderThickness="0,0,0,1">
+            <TextBlock Text="Windows Update" Foreground="#E6E7EA" FontSize="16" FontWeight="SemiBold" Margin="18,12"/>
+        </Border>
+        <Border x:Name="WuBanner" Grid.Row="1" Background="#3A2F12" BorderBrush="#7A5E16" BorderThickness="0,0,0,1" Visibility="Collapsed">
+            <TextBlock Foreground="#F4D58A" Margin="18,8" Text="Genstart påkrævet — opdateringer afventer en genstart."/>
+        </Border>
+        <TextBlock x:Name="TxtWuSummary" Grid.Row="2" Foreground="#9AA0AA" Margin="18,12,18,8" TextWrapping="Wrap"/>
+        <Border Grid.Row="3" Margin="18,0" Background="#101114" BorderBrush="#2E2F36" BorderThickness="1" CornerRadius="6">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="WuList" Margin="10"/>
+            </ScrollViewer>
+        </Border>
+        <Grid Grid.Row="4" Margin="18,10">
+            <TextBlock x:Name="TxtWuUpdated" Foreground="#9AA0AA" FontSize="12" VerticalAlignment="Center"/>
+            <Button x:Name="BtnWuClose" Content="Luk" HorizontalAlignment="Right" Padding="18,6"
+                    Background="#2B2C33" Foreground="#E6E7EA" BorderBrush="#3A3B43" BorderThickness="1" Cursor="Hand"/>
+        </Grid>
+    </Grid>
+</Window>
+'@
+
+# Background COM query — fast (offline pending search + local history + reboot flag).
+$script:WuWork = {
+    $res = @{ Pending = 0; History = @(); Reboot = $false; Error = $null }
+    try {
+        $session = New-Object -ComObject Microsoft.Update.Session
+        $searcher = $session.CreateUpdateSearcher()
+        try { $searcher.Online = $false } catch {}
+        try { $res.Pending = $searcher.Search('IsInstalled=0 and IsHidden=0').Updates.Count } catch {}
+        try {
+            $total = $searcher.GetTotalHistoryCount()
+            if ($total -gt 0) {
+                foreach ($e in $searcher.QueryHistory(0, [math]::Min($total, 25))) {
+                    $res.History += @{ Title = [string]$e.Title; Result = [int]$e.ResultCode }
+                }
+            }
+        } catch {}
+        try { $res.Reboot = [bool](New-Object -ComObject Microsoft.Update.SystemInfo).RebootRequired } catch {}
+    } catch { $res.Error = $_.Exception.Message }
+    return $res
+}
+
+function Update-WuStatus {
+    if (-not $script:WuWindow) { return }
+    Start-BackgroundWork -Work $script:WuWork -OnComplete {
+        param($res)
+        if (-not $script:WuWindow) { return }
+        if (-not ($res -is [hashtable])) { return }
+        $banner = $script:WuWindow.FindName('WuBanner')
+        $sum = $script:WuWindow.FindName('TxtWuSummary')
+        $list = $script:WuWindow.FindName('WuList')
+        $upd = $script:WuWindow.FindName('TxtWuUpdated')
+        if ($res.Error) { $sum.Text = "Kunne ikke læse Windows Update: $($res.Error)"; return }
+        $banner.Visibility = if ($res.Reboot) { 'Visible' } else { 'Collapsed' }
+        $ok = 0; $fail = 0
+        foreach ($h in $res.History) { if ($h.Result -eq 2) { $ok++ } elseif ($h.Result -ge 3) { $fail++ } }
+        $sum.Text = ('{0} afventer · {1} installeret · {2} fejlet (seneste historik)' -f $res.Pending, $ok, $fail)
+        $map = @{ 0 = 'Afventer'; 1 = 'I gang'; 2 = 'Lykkedes'; 3 = 'Med fejl'; 4 = 'Fejlet'; 5 = 'Afbrudt' }
+        $col = @{ 0 = '#9AA0AA'; 1 = '#3B82F6'; 2 = '#22C55E'; 3 = '#F59E0B'; 4 = '#EF4444'; 5 = '#EF4444' }
+        $list.Children.Clear()
+        foreach ($h in $res.History) {
+            $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,3'
+            $chip = New-Object System.Windows.Controls.TextBlock
+            $chip.Text = $(if ($map.ContainsKey($h.Result)) { $map[$h.Result] } else { "Kode $($h.Result)" })
+            $chip.Width = 80
+            $chip.Foreground = $(if ($col.ContainsKey($h.Result)) { $col[$h.Result] } else { '#9AA0AA' })
+            $t = New-Object System.Windows.Controls.TextBlock
+            $t.Text = $h.Title; $t.Foreground = '#C8CBD2'; $t.TextTrimming = 'CharacterEllipsis'
+            [void]$row.Children.Add($chip); [void]$row.Children.Add($t)
+            [void]$list.Children.Add($row)
+        }
+        if ($res.History.Count -eq 0) {
+            $empty = New-Object System.Windows.Controls.TextBlock
+            $empty.Text = 'Ingen Windows Update-historik endnu.'; $empty.Foreground = '#9AA0AA'
+            [void]$list.Children.Add($empty)
+        }
+        $upd.Text = "Opdateret kl. $((Get-Date).ToString('HH:mm:ss'))"
+    }
+}
+
+function Open-WuWindow {
+    if ($script:WuWindow) { try { [void]$script:WuWindow.Activate(); return } catch { $script:WuWindow = $null } }
+    $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:WuXaml)
+    $w = [Windows.Markup.XamlReader]::Load($reader)
+    try { $w.Owner = $script:Window } catch {}      # closes with the main window
+    if ($script:LogoImage) { $w.Icon = $script:LogoImage }
+    $w.FindName('BtnWuClose').Add_Click({ if ($script:WuWindow) { $script:WuWindow.Close() } })
+    $w.Add_Closed({ if ($script:WuTimer) { $script:WuTimer.Stop() }; $script:WuWindow = $null })
+    $w.FindName('TxtWuSummary').Text = 'Indlæser Windows Update-status...'
+    $script:WuWindow = $w
+
+    if (-not $script:WuTimer) {
+        $script:WuTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:WuTimer.Interval = [TimeSpan]::FromSeconds(10)
+        $script:WuTimer.Add_Tick({ Update-WuStatus })
+    }
+    $w.Show()
+    $w.Topmost = $true; [void]$w.Activate(); $w.Topmost = $false
+    $script:WuTimer.Start()
+    Update-WuStatus
+    Write-LogLine 'Windows Update-status åbnet'
+}
+#endregion
+
 #region ---------------------------------------------------------- Automatic sequence
 function Update-SequenceControls {
     $running = $script:SeqRunning
@@ -828,6 +953,7 @@ function Start-AutoSequence {
     Set-KeepAwake $true
     Update-Chips
     Update-SequenceControls
+    Open-WuWindow   # show live Windows Update status alongside the countdown
     Write-LogLine ("Automatisk sekvens startet (nedtælling {0} min, derefter GRS + IME-genstart)" -f $min)
 
     if (-not $script:SeqTimer) {
@@ -926,6 +1052,7 @@ $script:UI.BtnRunIme.Add_Click({
 $script:UI.BtnImeLogs.Add_Click({ Open-FolderSafe $script:ImeLogsPath 'IME-logs' })
 $script:UI.BtnPrograms.Add_Click({ Write-LogLine 'Åbner Programmer...'; try { Start-Process 'control.exe' -ArgumentList 'appwiz.cpl' } catch { Write-LogLine "Kunne ikke åbne Programmer: $($_.Exception.Message)" 'ERROR' } })
 $script:UI.BtnTaskMgr.Add_Click({ Write-LogLine 'Åbner Jobliste...'; try { Start-Process 'taskmgr.exe' } catch { Write-LogLine "Kunne ikke åbne Jobliste: $($_.Exception.Message)" 'ERROR' } })
+$script:UI.BtnWuOpen.Add_Click({ Open-WuWindow })
 $script:UI.BtnViewLog.Add_Click({ Write-LogLine 'Åbner logfil...'; try { if (Test-Path $script:LogFile) { Start-Process 'notepad.exe' -ArgumentList "`"$($script:LogFile)`"" } else { Write-LogLine 'Logfilen findes ikke endnu' 'WARN' } } catch { Write-LogLine "Kunne ikke åbne logfil: $($_.Exception.Message)" 'ERROR' } })
 
 # Bring the window to the foreground — it launches from a hidden background process, so Windows
