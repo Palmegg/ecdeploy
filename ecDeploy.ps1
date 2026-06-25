@@ -993,6 +993,15 @@ $script:WuDriveWork = {
     try {
         $session = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
+        # Opt into Microsoft Update (Office, drivers, other MS products) — like PSWindowsUpdate -MicrosoftUpdate.
+        $muId = '7971f918-a847-4430-9279-4a52d1efe18d'
+        try {
+            $sm = New-Object -ComObject Microsoft.Update.ServiceManager
+            [void]$sm.AddService2($muId, 7, '')   # 7 = pending|online|registerWithAU
+            $searcher.ServerSelection = 3         # 3 = ssOthers
+            $searcher.ServiceID = $muId
+            $Queue.Enqueue('Windows Update: Microsoft Update aktiveret')
+        } catch { $Queue.Enqueue('Windows Update: Microsoft Update ikke tilgængelig, bruger standard') }
         $Queue.Enqueue('Windows Update: søger...')
         $sr = $searcher.Search('IsInstalled=0 and IsHidden=0')
         $res.Searched = $sr.Updates.Count
