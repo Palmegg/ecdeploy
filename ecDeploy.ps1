@@ -737,6 +737,28 @@ $script:AppStatusWork = {
     $base = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
     $res = @{ Apps = @(); Installed = 0; Failed = 0; Pending = 0; Unknown = 0; Note = '' }
     if (-not (Test-Path $base)) { $res.Note = 'Win32Apps-nøglen findes ikke (maskinen er måske ikke Intune-managed endnu).'; return $res }
+
+    # Best-effort GUID -> friendly name map from the IME log (format varies by IME version).
+    $nameMap = @{}
+    $imeLog = Join-Path $env:ProgramData 'Microsoft\IntuneManagementExtension\Logs\IntuneManagementExtension.log'
+    if (Test-Path $imeLog) {
+        try {
+            $fs = [System.IO.File]::Open($imeLog, 'Open', 'Read', 'ReadWrite')
+            $rdr = New-Object System.IO.StreamReader($fs); $logText = $rdr.ReadToEnd(); $rdr.Close(); $fs.Close()
+            $guid = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+            $patterns = @(
+                [regex]("(?i)name[`"']?\s*[:=]\s*[`"'](?<name>[^`"']+)[`"'].{0,160}?(?<id>$guid)"),
+                [regex]("(?i)(?<id>$guid).{0,160}?name[`"']?\s*[:=]\s*[`"'](?<name>[^`"']+)[`"']")
+            )
+            foreach ($rx in $patterns) {
+                foreach ($m in $rx.Matches($logText)) {
+                    $gid = $m.Groups['id'].Value.ToLower(); $nm = $m.Groups['name'].Value.Trim()
+                    if ($gid -and $nm -and -not $nameMap.ContainsKey($gid)) { $nameMap[$gid] = $nm }
+                }
+            }
+        } catch {}
+    }
+
     $skip = @('GRS','Reporting','OperationalState','GRSStore')
     foreach ($ctx in (Get-ChildItem $base -ErrorAction SilentlyContinue)) {
         if ($skip -contains $ctx.PSChildName) { continue }
@@ -761,7 +783,13 @@ $script:AppStatusWork = {
                 else { $label = "Kode $n" }
             }
             switch ($cat) { 'Installed' { $res.Installed++ } 'Failed' { $res.Failed++ } 'Pending' { $res.Pending++ } default { $res.Unknown++ } }
-            $res.Apps += [pscustomobject]@{ Id = $app.PSChildName; Label = $label; Cat = $cat; Code = $code; Err = $err }
+            $id = $app.PSChildName
+            $name = $id
+            if ($id -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                $g = $matches[1].ToLower()
+                if ($nameMap.ContainsKey($g)) { $name = $nameMap[$g] }
+            }
+            $res.Apps += [pscustomobject]@{ Id = $id; Name = $name; Label = $label; Cat = $cat; Code = $code; Err = $err }
         }
     }
     return $res
@@ -785,8 +813,9 @@ function Update-AppStatus {
             $chip = New-Object System.Windows.Controls.TextBlock
             $chip.Text = $a.Label; $chip.Width = 90; $chip.Foreground = $colors[$a.Cat]
             $id = New-Object System.Windows.Controls.TextBlock
-            $id.Text = $a.Id + $(if ($null -ne $a.Err -and $a.Err -ne 0) { "   fejlkode: $($a.Err)" } else { '' })
-            $id.Foreground = '#C8CBD2'; $id.FontFamily = 'Consolas'; $id.FontSize = 11
+            $id.Text = $a.Name + $(if ($null -ne $a.Err -and $a.Err -ne 0) { "   fejlkode: $($a.Err)" } else { '' })
+            $id.Foreground = '#C8CBD2'; $id.FontSize = 12; $id.TextTrimming = 'CharacterEllipsis'
+            if ($a.Name -eq $a.Id) { $id.FontFamily = 'Consolas'; $id.FontSize = 11 }   # GUID fallback: monospace
             [void]$row.Children.Add($chip); [void]$row.Children.Add($id)
             [void]$script:UI.AppsList.Children.Add($row)
         }
@@ -884,7 +913,7 @@ $script:WuXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Update — status" Height="540" Width="600" MinHeight="360" MinWidth="460"
-        WindowStartupLocation="CenterScreen" Background="#15161A" FontFamily="Segoe UI" FontSize="13">
+        WindowState="Maximized" WindowStartupLocation="CenterScreen" Background="#15161A" FontFamily="Segoe UI" FontSize="13">
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
