@@ -28,7 +28,11 @@ $script:Version = '1.0.0'
 trap {
     $__chain = @()
     $__ex = $_.Exception
-    while ($__ex) { $__chain += ($__ex.GetType().Name + ': ' + $__ex.Message); $__ex = $__ex.InnerException }
+    while ($__ex) {
+        $__chain += ($__ex.GetType().Name + ': ' + $__ex.Message)
+        if ($__ex.StackTrace) { $__chain += ('   @ ' + (($__ex.StackTrace -split "`r?`n")[0]).Trim()) }
+        $__ex = $__ex.InnerException
+    }
     $detail = @(
         ($__chain -join "`r`n--> ")
         $_.InvocationInfo.PositionMessage
@@ -506,12 +510,18 @@ if ($script:Profile) {
     # Recolour the accent. Buttons use DynamicResource Accent/AccentHover (Background); the
     # ProgressBar Foreground is set directly in code (some ProgressBar templates reject a
     # DynamicResource brush swap on its Foreground).
+    # Cast to [Brush] so the resource is a real .NET Brush, never a PSObject-wrapped one
+    # (a PSObject in a DynamicResource throws "PSObject cannot be converted to Brush" on render).
     if ($script:Profile.AccentHover) {
-        try { $script:Window.Resources['AccentHover'] = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.AccentHover)) } catch {}
+        try {
+            $hoverColor = [System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.AccentHover)
+            $script:Window.Resources['AccentHover'] = [System.Windows.Media.Brush]([System.Windows.Media.SolidColorBrush]::new($hoverColor))
+        } catch {}
     }
     if ($script:Profile.Accent) {
         try {
-            $accentBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.Accent))
+            $accentColor = [System.Windows.Media.ColorConverter]::ConvertFromString($script:Profile.Accent)
+            $accentBrush = [System.Windows.Media.Brush]([System.Windows.Media.SolidColorBrush]::new($accentColor))
             $script:Window.Resources['Accent'] = $accentBrush
             $script:UI.BarAuto.Foreground = $accentBrush
         } catch {}
