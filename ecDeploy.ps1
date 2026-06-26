@@ -188,9 +188,9 @@ try { if (-not (Test-Path $script:LogDir)) { New-Item -ItemType Directory -Path 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ecDeploy" Height="700" Width="880" MinHeight="600" MinWidth="800"
-        WindowState="Maximized" WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
-        Background="#15161A" FontFamily="Segoe UI" FontSize="13" UseLayoutRounding="True">
+        Title="ecDeploy" Height="600" Width="820" MinHeight="480" MinWidth="700"
+        WindowStartupLocation="CenterScreen" ResizeMode="CanResize"
+        Background="#15161A" FontFamily="Segoe UI" FontSize="12" UseLayoutRounding="True">
     <Window.Resources>
         <SolidColorBrush x:Key="Accent"      Color="#3B82F6"/>
         <SolidColorBrush x:Key="AccentHover" Color="#2F6FE0"/>
@@ -301,7 +301,7 @@ $xaml = @'
         <!-- Body -->
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="210"/>
+                <ColumnDefinition Width="186"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
@@ -402,7 +402,7 @@ $xaml = @'
                             <TextBlock x:Name="TxtWuSummary" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="14,0,0,0" TextWrapping="Wrap"/>
                         </StackPanel>
                         <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6">
-                            <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+                            <ScrollViewer MaxHeight="210" VerticalScrollBarVisibility="Auto">
                                 <StackPanel x:Name="WuList" Margin="10"/>
                             </ScrollViewer>
                         </Border>
@@ -416,7 +416,7 @@ $xaml = @'
                             <TextBlock x:Name="TxtAppsSummary" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="14,0,0,0"/>
                         </StackPanel>
                         <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6">
-                            <ScrollViewer MaxHeight="280" VerticalScrollBarVisibility="Auto">
+                            <ScrollViewer MaxHeight="210" VerticalScrollBarVisibility="Auto">
                                 <StackPanel x:Name="AppsList" Margin="8"/>
                             </ScrollViewer>
                         </Border>
@@ -430,7 +430,7 @@ $xaml = @'
                             <TextBlock x:Name="TxtImeLogStatus" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="16,0,0,0"/>
                         </StackPanel>
                         <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6">
-                            <TextBox x:Name="ImeLogBox" Height="280" Margin="8" Background="Transparent" Foreground="#C8CBD2"
+                            <TextBox x:Name="ImeLogBox" Height="200" Margin="8" Background="Transparent" Foreground="#C8CBD2"
                                      BorderThickness="0" IsReadOnly="True" FontFamily="Consolas" FontSize="11"
                                      VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" TextWrapping="NoWrap"/>
                         </Border>
@@ -439,7 +439,7 @@ $xaml = @'
                     <!-- Device info + diagnostics -->
                     <StackPanel x:Name="PanelInfo" Visibility="Collapsed">
                         <Border Background="#101114" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="6" Margin="0,0,0,12">
-                            <TextBox x:Name="InfoBox" Height="250" Margin="8" Background="Transparent" Foreground="#C8CBD2"
+                            <TextBox x:Name="InfoBox" Height="180" Margin="8" Background="Transparent" Foreground="#C8CBD2"
                                      BorderThickness="0" IsReadOnly="True" FontFamily="Consolas" FontSize="12" VerticalScrollBarVisibility="Auto"/>
                         </Border>
                         <StackPanel Orientation="Horizontal">
@@ -956,16 +956,16 @@ function Update-WuStatus {
         if ($res.Error) { $script:UI.TxtWuSummary.Text = "Kunne ikke læse Windows Update: $($res.Error)"; return }
         $script:UI.WuBanner.Visibility = if ($res.Reboot) { 'Visible' } else { 'Collapsed' }
         $ok = 0; $fail = 0
-        foreach ($h in $res.History) { if ($h.Result -eq 2) { $ok++ } elseif ($h.Result -ge 3) { $fail++ } }
+        foreach ($h in $res.History) { if ($h.Result -eq 2 -or $h.Result -eq 3) { $ok++ } elseif ($h.Result -ge 4) { $fail++ } }
         $script:UI.TxtWuSummary.Text = ('{0} afventer · {1} installeret · {2} fejlet (seneste historik)' -f $res.Pending, $ok, $fail)
-        $map = @{ 0 = 'Afventer'; 1 = 'I gang'; 2 = 'Lykkedes'; 3 = 'Med fejl'; 4 = 'Fejlet'; 5 = 'Afbrudt' }
+        $map = @{ 0 = 'Ikke startet'; 1 = 'I gang'; 2 = 'Installeret'; 3 = 'Installeret (advarsler)'; 4 = 'Fejlet'; 5 = 'Afbrudt' }
         $col = @{ 0 = '#9AA0AA'; 1 = '#3B82F6'; 2 = '#22C55E'; 3 = '#F59E0B'; 4 = '#EF4444'; 5 = '#EF4444' }
         $script:UI.WuList.Children.Clear()
         foreach ($h in $res.History) {
             $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,3'
             $chip = New-Object System.Windows.Controls.TextBlock
             $chip.Text = $(if ($map.ContainsKey($h.Result)) { $map[$h.Result] } else { "Kode $($h.Result)" })
-            $chip.Width = 80
+            $chip.Width = 150
             $chip.Foreground = $(if ($col.ContainsKey($h.Result)) { $col[$h.Result] } else { '#9AA0AA' })
             $t = New-Object System.Windows.Controls.TextBlock
             $t.Text = $h.Title; $t.Foreground = '#C8CBD2'; $t.TextTrimming = 'CharacterEllipsis'
@@ -1170,7 +1170,8 @@ function Start-CedraFlow {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
-                New-CedraResumeTask
+                # No resume task: the user must re-authenticate (admin/TAP) at next logon anyway,
+                # so CedraDeploy is NOT auto-started after the restart.
                 Start-RestartCountdown 60
                 return
             }
