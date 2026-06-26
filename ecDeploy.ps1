@@ -177,6 +177,7 @@ $script:SeqGrsFired   = $false
 $script:AutoStart     = [bool]$AutoSequence   # auto-start the sequence once the window is loaded
 $script:FlowName      = $Flow                 # customer flow to run on load (CedraStandard/CedraResume)
 $script:CedraRunning  = $false
+$script:WuDriveBusy   = $false
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -1034,13 +1035,38 @@ $script:WuDriveWork = {
 }
 
 function Start-WuDrive {
+    if ($script:WuDriveBusy) { Write-LogLine 'Windows Update kører allerede — springer denne runde over'; return }
     if (-not $script:WuWindow) { Open-WuWindow }
     if ($script:WuWindow) { $s = $script:WuWindow.FindName('TxtWuSummary'); if ($s) { $s.Text = 'Starter Windows Update...' } }
+    $script:WuDriveBusy = $true
     Start-BackgroundWork -Work $script:WuDriveWork -OnComplete {
         param($res)
-        if ($res -is [hashtable] -and $res.Error) { Write-LogLine "Windows Update fejlede: $($res.Error)" 'ERROR' }
+        $script:WuDriveBusy = $false
+        if ($res -is [hashtable]) {
+            if ($res.Error) { Write-LogLine "Windows Update fejlede: $($res.Error)" 'ERROR' }
+            else { Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed) }
+        }
         Update-WuStatus
     }
+}
+
+# Re-run the WU drive on a cadence so failed/transient updates get retried and newly-applicable
+# ones (revealed after others install) get picked up. The busy guard prevents overlapping runs.
+function Start-WuCadence {
+    $min = 5
+    if ($env:CEDRA_WU_MIN) { [void][int]::TryParse($env:CEDRA_WU_MIN, [ref]$min) }
+    if ($min -lt 1) { $min = 1 }
+    if (-not $script:WuCadenceTimer) {
+        $script:WuCadenceTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:WuCadenceTimer.Add_Tick({ Start-WuDrive })
+    }
+    $script:WuCadenceTimer.Interval = [TimeSpan]::FromMinutes($min)
+    $script:WuCadenceTimer.Start()
+    Write-LogLine ("Windows Update gentages hvert {0}. minut" -f $min)
+}
+
+function Stop-WuCadence {
+    if ($script:WuCadenceTimer) { $script:WuCadenceTimer.Stop() }
 }
 #endregion
 
@@ -1143,6 +1169,7 @@ function Start-CedraFlow {
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
     Start-WuDrive
+    Start-WuCadence
 
     if (-not $script:CedraTimer) {
         $script:CedraTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1173,6 +1200,7 @@ function Start-CedraFlow {
 
 function Stop-CedraFlow {
     if ($script:CedraTimer) { $script:CedraTimer.Stop() }
+    Stop-WuCadence
     $script:CedraRunning = $false
     Set-KeepAwake $false
     $script:UI.BarAuto.Value = 0
@@ -1192,6 +1220,7 @@ function Start-CedraResume {
     $script:UI.TxtNoSleepStatus.Text = 'CedraDeploy genoptagelse — anti-sleep aktiv, Windows Update kører.'
     Write-LogLine 'CedraDeploy resume: anti-sleep + Windows Update'
     Start-WuDrive
+    Start-WuCadence
 }
 #endregion
 
