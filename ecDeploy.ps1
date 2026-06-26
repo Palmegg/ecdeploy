@@ -307,26 +307,28 @@ $xaml = @'
 
             <!-- Left rail -->
             <Border Grid.Column="0" Background="#1C1D22" BorderBrush="{StaticResource Border}" BorderThickness="0,0,1,0">
-                <DockPanel Margin="0,12">
-                    <StackPanel DockPanel.Dock="Top">
-                        <TextBlock Text="HANDLINGER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,4,0,4"/>
-                        <Button x:Name="NavAuto"    Style="{StaticResource NavButton}" Content="Automatisk sekvens"/>
-                        <Button x:Name="NavNoSleep" Style="{StaticResource NavButton}" Content="No Sleep"/>
-                        <Button x:Name="NavGrs"     Style="{StaticResource NavButton}" Content="Opdater GRS"/>
-                        <Button x:Name="NavIme"     Style="{StaticResource NavButton}" Content="Genstart IME"/>
-                        <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
-                        <TextBlock Text="DIAGNOSTIK" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
-                        <Button x:Name="NavWu"      Style="{StaticResource NavButton}" Content="Windows Update"/>
-                        <Button x:Name="NavApps"    Style="{StaticResource NavButton}" Content="App-status"/>
-                        <Button x:Name="NavImeLog"  Style="{StaticResource NavButton}" Content="Live IME-log"/>
-                        <Button x:Name="NavInfo"    Style="{StaticResource NavButton}" Content="Enheds-info"/>
-                        <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
-                        <TextBlock Text="VÆRKTØJER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
-                        <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
-                        <Button x:Name="BtnPrograms" Style="{StaticResource NavButton}" Content="Programmer"/>
-                        <Button x:Name="BtnTaskMgr"  Style="{StaticResource NavButton}" Content="Jobliste"/>
-                    </StackPanel>
-                    <Button x:Name="BtnViewLog" DockPanel.Dock="Bottom" Style="{StaticResource NavButton}" Content="Vis logfil" VerticalAlignment="Bottom"/>
+                <DockPanel Margin="0,12" LastChildFill="True">
+                    <Button x:Name="BtnViewLog" DockPanel.Dock="Bottom" Style="{StaticResource NavButton}" Content="Vis logfil"/>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                            <TextBlock Text="HANDLINGER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,4,0,4"/>
+                            <Button x:Name="NavAuto"    Style="{StaticResource NavButton}" Content="Automatisk sekvens"/>
+                            <Button x:Name="NavNoSleep" Style="{StaticResource NavButton}" Content="No Sleep"/>
+                            <Button x:Name="NavGrs"     Style="{StaticResource NavButton}" Content="Opdater GRS"/>
+                            <Button x:Name="NavIme"     Style="{StaticResource NavButton}" Content="Genstart IME"/>
+                            <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
+                            <TextBlock Text="DIAGNOSTIK" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
+                            <Button x:Name="NavWu"      Style="{StaticResource NavButton}" Content="Windows Update"/>
+                            <Button x:Name="NavApps"    Style="{StaticResource NavButton}" Content="App-status"/>
+                            <Button x:Name="NavImeLog"  Style="{StaticResource NavButton}" Content="Live IME-log"/>
+                            <Button x:Name="NavInfo"    Style="{StaticResource NavButton}" Content="Enheds-info"/>
+                            <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
+                            <TextBlock Text="VÆRKTØJER" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
+                            <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
+                            <Button x:Name="BtnPrograms" Style="{StaticResource NavButton}" Content="Programmer"/>
+                            <Button x:Name="BtnTaskMgr"  Style="{StaticResource NavButton}" Content="Jobliste"/>
+                        </StackPanel>
+                    </ScrollViewer>
                 </DockPanel>
             </Border>
 
