@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.3.0'
+$script:Version = '1.3.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1226,7 +1226,7 @@ function Start-WuDrive {
             else {
                 Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed)
                 # In the resume (post-login) flow a clean WU round means provisioning has settled.
-                if ($script:CedraResuming) { Set-PcdCheck 'provisioning' 'Klargøring' 'ok' 'Klar' }
+                if ($script:CedraResuming) { Set-PcdCheck 'provisioning' 'CedraDeploy klar' 'ok' 'Klar' }
             }
         }
         Update-WuStatus
@@ -1355,7 +1355,7 @@ function Start-CedraFlow {
     $script:UI.TxtAutoMinutes.IsEnabled = $false
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
-    Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'CedraStandard'
+    Set-PcdCheck 'provisioning' 'CedraDeploy kører' 'running' 'CedraStandard'
     Start-WuDrive
     Start-WuCadence
     Report-PcdStatus      # immediate first board update
@@ -1412,7 +1412,7 @@ function Start-CedraResume {
     Show-Panel 'PanelNoSleep' $(if ($script:Profile) { $script:Profile.Brand } else { 'CedraDeploy' })
     $script:UI.TxtNoSleepStatus.Text = 'CedraDeploy genoptagelse — anti-sleep aktiv, Windows Update kører.'
     Write-LogLine 'CedraDeploy resume: anti-sleep + Windows Update'
-    Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'Genoptager efter login'
+    Set-PcdCheck 'provisioning' 'CedraDeploy kører' 'running' 'Genoptager efter login'
     Start-WuDrive
     Start-WuCadence
     Report-PcdStatus      # immediate first board update
