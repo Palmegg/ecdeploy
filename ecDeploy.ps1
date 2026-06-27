@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.2.0'
+$script:Version = '1.3.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -167,6 +167,17 @@ $script:Customers = @{
         # PcdBaseUrl is just an internal URL (not a secret). PcdApiKey stays empty (auth off server-side).
         PcdBaseUrl  = 'http://10.10.20.27:5173/api'
         PcdApiKey   = ''
+        # GUID -> friendly name for Intune Win32 apps (the registry only exposes GUIDs). Keyed by the
+        # base GUID (the IME app id without any "_1" revision suffix), lowercase.
+        PcdAppNames = @{
+            '3b61435b-92b3-400b-99d9-5e710244ae7b' = '7-Zip'
+            '92680d28-18b2-47b8-9acd-21c0c35f3abf' = 'AdminRemover'
+            'e621fc1f-a00a-4e67-9d32-734e59303bc3' = 'Adobe Reader'
+            '3859ac67-a6e9-426b-a79a-368c306702bc' = 'DeviceRenamer'
+            '8d8ff2c8-9e91-464a-b2c7-ea8e92546caa' = 'Firmaportal'
+            '67391164-7e55-47cb-8ca5-5fa9116d85f8' = 'Jabra Direct'
+            '4e1fefc1-8986-48ba-ad18-d57251e23bc9' = 'Logitech Options+'
+        }
     }
 }
 $script:Profile = $null
@@ -618,11 +629,13 @@ try {
 } catch {}
 
 # Read endpoint config from the active customer profile (null-safe).
-$script:PcdBaseUrl = $null
-$script:PcdApiKey  = $null
+$script:PcdBaseUrl  = $null
+$script:PcdApiKey   = $null
+$script:PcdAppNames = @{}
 if ($script:Profile) {
     if ($script:Profile.ContainsKey('PcdBaseUrl')) { $script:PcdBaseUrl = $script:Profile.PcdBaseUrl }
     if ($script:Profile.ContainsKey('PcdApiKey'))  { $script:PcdApiKey  = $script:Profile.PcdApiKey }
+    if ($script:Profile.ContainsKey('PcdAppNames')) { $script:PcdAppNames = $script:Profile.PcdAppNames }
 }
 
 # POST a batch of checks to PCD9000 on a background runspace. The server merges checks by 'key'.
@@ -704,23 +717,31 @@ function Report-PcdStatus {
         if (-not ($res -is [hashtable]) -or -not $res.Apps) { return }
         $checks = @()
         foreach ($a in $res.Apps) {
+            # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
+            # revision suffix is ignored) and look it up; otherwise fall back to $a.Name (IME-log map / GUID).
+            $name = $a.Name
+            if ("$($a.Id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                $gid = $matches[1].ToLower()
+                if ($script:PcdAppNames.ContainsKey($gid)) { $name = $script:PcdAppNames[$gid] }
+            }
             switch ($a.Cat) {
-                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$($a.Name) OK";       status = 'ok';   message = '' } }
-                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$($a.Name) fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
-                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "Mangler $($a.Name)";  status = 'warn'; message = '' } }
+                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
+                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
+                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "Mangler $name";  status = 'warn'; message = '' } }
                 default     { }   # Unknown — skip
             }
         }
         if ($checks.Count -gt 0) { Send-PcdReport $checks }
     }
 
-    # Windows Update + reboot: read-only status snapshot ($script:WuWork). The 'running' state is
-    # driven off the live $script:WuDriveBusy flag (set while a WU drive is installing).
+    # Windows Update + reboot: read-only status snapshot ($script:WuWork). 'running' when a WU drive
+    # is live ($script:WuDriveBusy) OR the history shows a recent InProgress entry — so the badge
+    # doesn't say "OK" while the panel still shows "I gang".
     Start-BackgroundWork -Work $script:WuWork -OnComplete {
         param($res)
         if (-not ($res -is [hashtable])) { return }
         $checks = @()
-        if ($script:WuDriveBusy) {
+        if ($script:WuDriveBusy -or $res.InProgress -gt 0) {
             $checks += @{ key = 'windows_update'; label = 'Windows Update kører'; status = 'running'; message = '' }
         } elseif ($res.Pending -gt 0) {
             $checks += @{ key = 'windows_update'; label = 'Mangler Windows Update'; status = 'warn'; message = ("{0} afventer" -f $res.Pending) }
@@ -1093,17 +1114,23 @@ $script:WuTimer = $null
 
 # Background COM query — fast (offline pending search + local history + reboot flag).
 $script:WuWork = {
-    $res = @{ Pending = 0; History = @(); Reboot = $false; Error = $null }
+    $res = @{ Pending = 0; History = @(); Reboot = $false; InProgress = 0; Error = $null }
     try {
         $session = New-Object -ComObject Microsoft.Update.Session
         $searcher = $session.CreateUpdateSearcher()
         try { $searcher.Online = $false } catch {}
         try { $res.Pending = $searcher.Search('IsInstalled=0 and IsHidden=0').Updates.Count } catch {}
         try {
+            $cutoff = (Get-Date).AddMinutes(-30)
             $total = $searcher.GetTotalHistoryCount()
             if ($total -gt 0) {
                 foreach ($e in $searcher.QueryHistory(0, [math]::Min($total, 25))) {
-                    $res.History += @{ Title = [string]$e.Title; Result = [int]$e.ResultCode }
+                    $date = $null
+                    try { $date = [datetime]$e.Date } catch {}
+                    $res.History += @{ Title = [string]$e.Title; Result = [int]$e.ResultCode; Date = $date }
+                    # Count "InProgress" (ResultCode 1) entries seen within the last 30 minutes; a
+                    # missing/invalid date is not counted (tolerate it rather than guess).
+                    if ([int]$e.ResultCode -eq 1 -and $date -and $date -ge $cutoff) { $res.InProgress++ }
                 }
             }
         } catch {}
