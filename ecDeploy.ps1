@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.0'
+$script:Version = '1.4.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -633,6 +633,10 @@ try {
     if ($sn) { $script:DeviceSerial = "$sn".Trim() }
 } catch {}
 
+# A fresh session id per ecDeploy run. The server resets this machine's board badges whenever the
+# id changes, so a new run (e.g. after a reinstall) clears stale badges from the previous run.
+$script:PcdSessionId = [guid]::NewGuid().ToString()
+
 # Read endpoint config from the active customer profile (null-safe).
 $script:PcdBaseUrl  = $null
 $script:PcdApiKey   = $null
@@ -654,7 +658,7 @@ function Send-PcdReport {
     if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
-        $body = @{ serialNumber = $script:DeviceSerial; checks = $Checks } | ConvertTo-Json -Depth 6
+        $body = @{ serialNumber = $script:DeviceSerial; session = $script:PcdSessionId; checks = $Checks } | ConvertTo-Json -Depth 6
         $uri  = "$script:PcdBaseUrl/agent/report"
         $headers = @{}
         if ($script:PcdApiKey) { $headers['X-Api-Key'] = $script:PcdApiKey }
