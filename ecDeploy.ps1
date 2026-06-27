@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.1.0'
+$script:Version = '1.1.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -652,7 +652,10 @@ function Send-PcdReport {
         $ps.Runspace = $rs
         [void]$ps.AddScript({
             try {
-                [void](Invoke-RestMethod -Method Post -Uri $Uri -Body $Body -ContentType 'application/json' -Headers $Headers -TimeoutSec 5)
+                # Send as UTF-8 bytes — PS 5.1's Invoke-RestMethod otherwise encodes the string as
+                # Latin1, mangling danske tegn (æ/ø/å) into invalid UTF-8 (e.g. "Klargøring" -> "Klarg?ring").
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+                [void](Invoke-RestMethod -Method Post -Uri $Uri -Body $bytes -ContentType 'application/json; charset=utf-8' -Headers $Headers -TimeoutSec 5)
             } catch {
                 # A 404 (no active prep for this S/N) or any network error is harmless — best-effort log only.
                 try { $Queue.Enqueue('PCD9000: kunne ikke sende status') } catch {}
