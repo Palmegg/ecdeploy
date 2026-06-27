@@ -162,10 +162,11 @@ $script:Customers = @{
         Accent      = '#14B8A6'
         AccentHover = '#0D9488'
         LogoB64     = $script:CedraLogoB64
-        # PCD9000 status board. SOFT secret: this script is served publicly, so the key here is not
-        # real protection — the actual safeguard is that the /agent/report endpoint is internal-only.
-        PcdBaseUrl  = 'http://CHANGE-ME-PCD-HOST/api'
-        PcdApiKey   = 'CHANGE-ME'
+        # PCD9000 status board. This script is served publicly, so NO secret goes here — the
+        # safeguard is that /agent/report is internal-only and you must hit a valid in-progress S/N.
+        # PcdBaseUrl is just an internal URL (not a secret). PcdApiKey stays empty (auth off server-side).
+        PcdBaseUrl  = 'http://10.10.20.27:5173/api'
+        PcdApiKey   = ''
     }
 }
 $script:Profile = $null
