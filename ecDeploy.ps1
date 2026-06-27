@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.1.1'
+$script:Version = '1.2.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -690,6 +690,65 @@ function Set-PcdCheck {
     param([string]$Key, [string]$Label, [string]$Status, [string]$Message)
     Send-PcdReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
 }
+
+# Gather named app + Windows Update status and report them as PCD9000 badges. Each part runs on
+# its own background runspace via Start-BackgroundWork (same pattern as Update-AppStatus /
+# Update-WuStatus); the checks are built in the OnComplete callback (UI thread — safe) and each
+# part sends its own batch. Non-blocking and best-effort: returns immediately when not configured.
+function Report-PcdStatus {
+    if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial) { return }
+
+    # Apps: one badge per Intune Win32 app, by friendly name. Skip 'Unknown' to avoid noise.
+    Start-BackgroundWork -Work $script:AppStatusWork -OnComplete {
+        param($res)
+        if (-not ($res -is [hashtable]) -or -not $res.Apps) { return }
+        $checks = @()
+        foreach ($a in $res.Apps) {
+            switch ($a.Cat) {
+                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$($a.Name) OK";       status = 'ok';   message = '' } }
+                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$($a.Name) fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
+                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "Mangler $($a.Name)";  status = 'warn'; message = '' } }
+                default     { }   # Unknown — skip
+            }
+        }
+        if ($checks.Count -gt 0) { Send-PcdReport $checks }
+    }
+
+    # Windows Update + reboot: read-only status snapshot ($script:WuWork). The 'running' state is
+    # driven off the live $script:WuDriveBusy flag (set while a WU drive is installing).
+    Start-BackgroundWork -Work $script:WuWork -OnComplete {
+        param($res)
+        if (-not ($res -is [hashtable])) { return }
+        $checks = @()
+        if ($script:WuDriveBusy) {
+            $checks += @{ key = 'windows_update'; label = 'Windows Update kører'; status = 'running'; message = '' }
+        } elseif ($res.Pending -gt 0) {
+            $checks += @{ key = 'windows_update'; label = 'Mangler Windows Update'; status = 'warn'; message = ("{0} afventer" -f $res.Pending) }
+        } else {
+            $checks += @{ key = 'windows_update'; label = 'Windows Update OK'; status = 'ok'; message = '' }
+        }
+        if ($res.Reboot) {
+            $checks += @{ key = 'reboot'; label = 'Mangler genstart'; status = 'warn'; message = '' }
+        } else {
+            $checks += @{ key = 'reboot'; label = 'Genstart OK'; status = 'ok'; message = '' }
+        }
+        Send-PcdReport $checks
+    }
+}
+
+# Report PCD9000 status on a cadence (60 s) while a Cedra flow is active.
+function Start-PcdCadence {
+    if (-not $script:PcdCadenceTimer) {
+        $script:PcdCadenceTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:PcdCadenceTimer.Interval = [TimeSpan]::FromSeconds(60)
+        $script:PcdCadenceTimer.Add_Tick({ Report-PcdStatus })
+    }
+    $script:PcdCadenceTimer.Start()
+}
+
+function Stop-PcdCadence {
+    if ($script:PcdCadenceTimer) { $script:PcdCadenceTimer.Stop() }
+}
 #endregion
 
 #region ---------------------------------------------------------- No Sleep
@@ -805,6 +864,7 @@ function Invoke-GrsRefresh {
             $script:UI.TxtGrsStatus.Text = 'Færdig (se log).'
         }
         if (-not $script:SeqRunning) { $script:UI.BtnRunGrs.IsEnabled = $true }
+        Report-PcdStatus   # GRS just re-evaluated apps — refresh the board now
     }
 }
 #endregion
@@ -1135,17 +1195,16 @@ function Start-WuDrive {
         if ($res -is [hashtable]) {
             if ($res.Error) {
                 Write-LogLine "Windows Update fejlede: $($res.Error)" 'ERROR'
-                Set-PcdCheck 'windows_update' 'Windows Update' 'fail' $res.Error
             }
             else {
                 Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed)
-                Set-PcdCheck 'windows_update' 'Windows Update' 'ok' ("{0} installeret" -f $res.Installed)
                 # In the resume (post-login) flow a clean WU round means provisioning has settled.
                 if ($script:CedraResuming) { Set-PcdCheck 'provisioning' 'Klargøring' 'ok' 'Klar' }
             }
-            if ($res.Reboot) { Set-PcdCheck 'reboot' 'Genstart' 'warn' 'Mangler genstart' }
         }
         Update-WuStatus
+        # WU/reboot/app badges are driven entirely by Report-PcdStatus — refresh now for a quick update.
+        Report-PcdStatus
     }
 }
 
@@ -1272,6 +1331,8 @@ function Start-CedraFlow {
     Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'CedraStandard'
     Start-WuDrive
     Start-WuCadence
+    Report-PcdStatus      # immediate first board update
+    Start-PcdCadence      # then refresh app/WU badges every 60 s
 
     if (-not $script:CedraTimer) {
         $script:CedraTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1304,6 +1365,7 @@ function Start-CedraFlow {
 function Stop-CedraFlow {
     if ($script:CedraTimer) { $script:CedraTimer.Stop() }
     Stop-WuCadence
+    Stop-PcdCadence
     $script:CedraRunning = $false
     Set-KeepAwake $false
     $script:UI.BarAuto.Value = 0
@@ -1326,6 +1388,8 @@ function Start-CedraResume {
     Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'Genoptager efter login'
     Start-WuDrive
     Start-WuCadence
+    Report-PcdStatus      # immediate first board update
+    Start-PcdCadence      # then refresh app/WU badges every 60 s
 }
 #endregion
 
