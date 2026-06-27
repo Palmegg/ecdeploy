@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.3.2'
+$script:Version = '1.3.3'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -739,7 +739,7 @@ function Report-PcdStatus {
             switch ($a.Cat) {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
                 'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
-                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "Mangler $name";  status = 'warn'; message = '' } }
+                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }
                 default     { }   # Unknown — skip
             }
         }
