@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.3.3'
+$script:Version = '1.4.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -740,7 +740,7 @@ function Report-PcdStatus {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
                 'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
                 'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }
-                default     { }   # Unknown — skip
+                default     { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }   # Unknown — orange, same as Pending
             }
         }
         if ($checks.Count -gt 0) { Send-PcdReport $checks }
@@ -756,7 +756,7 @@ function Report-PcdStatus {
         if ($script:WuDriveBusy -or $res.InProgress -gt 0) {
             $checks += @{ key = 'windows_update'; label = 'Windows Update kører'; status = 'running'; message = '' }
         } elseif ($res.Pending -gt 0) {
-            $checks += @{ key = 'windows_update'; label = 'Mangler Windows Update'; status = 'warn'; message = ("{0} afventer" -f $res.Pending) }
+            $checks += @{ key = 'windows_update'; label = 'Windows Update'; status = 'warn'; message = ("{0} afventer" -f $res.Pending) }
         } else {
             $checks += @{ key = 'windows_update'; label = 'Windows Update OK'; status = 'ok'; message = '' }
         }
@@ -892,7 +892,6 @@ function Invoke-GrsRefresh {
             if ($res.ImeRestarted) { $summary += ', IME genstartet' }
             elseif ($res.ImeMissing) { $summary += ', IME ikke fundet' }
             $script:UI.TxtGrsStatus.Text = $summary
-            Set-PcdCheck 'apps' 'Apps/Intune' 'running' 'GRS ryddet, geninstallerer'
             if ($script:SeqRunning) { $script:UI.TxtAutoStatus.Text = "GRS udført kl. $((Get-Date).ToString('HH:mm')) — holder maskinen vågen. Tryk Stop for at afslutte." }
         } else {
             $script:UI.TxtGrsStatus.Text = 'Færdig (se log).'
