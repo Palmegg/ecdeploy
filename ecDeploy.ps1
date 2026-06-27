@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.3.1'
+$script:Version = '1.3.2'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -620,6 +620,11 @@ function Start-BackgroundWork {
 # Report provisioning status to PcDeployer9000 so this machine's serial number is tied to a
 # station and shown live on a board. Strictly fire-and-forget: a 404 (no active prep for this
 # S/N) or any network error is harmless and must never block the UI thread or throw.
+#
+# PCD9000-integration er KUN aktiv under en customer-profil med PcdBaseUrl (p.t. CedraDanmark).
+# Den generiske ecDeploy (irm ecd.qwe.dk | iex, ingen -Customer) aktiverer intet af dette — alle
+# funktioner returnerer straks når $script:PcdEnabled er $false. Hooks i generiske handlinger
+# (fx Opdater GRS) er rene no-ops uden en Cedra-profil.
 
 # Capture the BIOS serial once at startup (tolerate failure — leave $null).
 $script:DeviceSerial = $null
@@ -638,9 +643,14 @@ if ($script:Profile) {
     if ($script:Profile.ContainsKey('PcdAppNames')) { $script:PcdAppNames = $script:Profile.PcdAppNames }
 }
 
+# Central master switch: PCD9000 is only ever active when a customer profile supplied a PcdBaseUrl
+# (i.e. CedraDanmark). Generic ecDeploy leaves this $false and every PCD9000 function no-ops.
+$script:PcdEnabled = [bool]$script:PcdBaseUrl
+
 # POST a batch of checks to PCD9000 on a background runspace. The server merges checks by 'key'.
 function Send-PcdReport {
     param([object[]]$Checks)
+    if (-not $script:PcdEnabled) { return }
     if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
@@ -701,6 +711,7 @@ function Send-PcdReport {
 # Convenience: report a single check.
 function Set-PcdCheck {
     param([string]$Key, [string]$Label, [string]$Status, [string]$Message)
+    if (-not $script:PcdEnabled) { return }
     Send-PcdReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
 }
 
@@ -709,7 +720,8 @@ function Set-PcdCheck {
 # Update-WuStatus); the checks are built in the OnComplete callback (UI thread — safe) and each
 # part sends its own batch. Non-blocking and best-effort: returns immediately when not configured.
 function Report-PcdStatus {
-    if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial) { return }
+    if (-not $script:PcdEnabled) { return }
+    if (-not $script:DeviceSerial) { return }
 
     # Apps: one badge per Intune Win32 app, by friendly name. Skip 'Unknown' to avoid noise.
     Start-BackgroundWork -Work $script:AppStatusWork -OnComplete {
@@ -759,6 +771,7 @@ function Report-PcdStatus {
 
 # Report PCD9000 status on a cadence (60 s) while a Cedra flow is active.
 function Start-PcdCadence {
+    if (-not $script:PcdEnabled) { return }
     if (-not $script:PcdCadenceTimer) {
         $script:PcdCadenceTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:PcdCadenceTimer.Interval = [TimeSpan]::FromSeconds(60)
