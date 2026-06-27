@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.0.0'
+$script:Version = '1.1.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -162,6 +162,10 @@ $script:Customers = @{
         Accent      = '#14B8A6'
         AccentHover = '#0D9488'
         LogoB64     = $script:CedraLogoB64
+        # PCD9000 status board. SOFT secret: this script is served publicly, so the key here is not
+        # real protection — the actual safeguard is that the /agent/report endpoint is internal-only.
+        PcdBaseUrl  = 'http://CHANGE-ME-PCD-HOST/api'
+        PcdApiKey   = 'CHANGE-ME'
     }
 }
 $script:Profile = $null
@@ -181,6 +185,7 @@ $script:SeqGrsFired   = $false
 $script:AutoStart     = [bool]$AutoSequence   # auto-start the sequence once the window is loaded
 $script:FlowName      = $Flow                 # customer flow to run on load (CedraStandard/CedraResume)
 $script:CedraRunning  = $false
+$script:CedraResuming = $false   # true while the post-login resume flow is active (PCD9000 reporting)
 $script:WuDriveBusy   = $false
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
@@ -599,6 +604,90 @@ function Start-BackgroundWork {
 }
 #endregion
 
+#region ---------------------------------------------------------- PCD9000 reporting
+# Report provisioning status to PcDeployer9000 so this machine's serial number is tied to a
+# station and shown live on a board. Strictly fire-and-forget: a 404 (no active prep for this
+# S/N) or any network error is harmless and must never block the UI thread or throw.
+
+# Capture the BIOS serial once at startup (tolerate failure — leave $null).
+$script:DeviceSerial = $null
+try {
+    $sn = (Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue).SerialNumber
+    if ($sn) { $script:DeviceSerial = "$sn".Trim() }
+} catch {}
+
+# Read endpoint config from the active customer profile (null-safe).
+$script:PcdBaseUrl = $null
+$script:PcdApiKey  = $null
+if ($script:Profile) {
+    if ($script:Profile.ContainsKey('PcdBaseUrl')) { $script:PcdBaseUrl = $script:Profile.PcdBaseUrl }
+    if ($script:Profile.ContainsKey('PcdApiKey'))  { $script:PcdApiKey  = $script:Profile.PcdApiKey }
+}
+
+# POST a batch of checks to PCD9000 on a background runspace. The server merges checks by 'key'.
+function Send-PcdReport {
+    param([object[]]$Checks)
+    if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
+
+    try {
+        $body = @{ serialNumber = $script:DeviceSerial; checks = $Checks } | ConvertTo-Json -Depth 6
+        $uri  = "$script:PcdBaseUrl/agent/report"
+        $headers = @{}
+        if ($script:PcdApiKey) { $headers['X-Api-Key'] = $script:PcdApiKey }
+
+        # Fire on a background runspace so the HTTP call never touches the UI thread and never
+        # blocks it. Only runspace-safe objects ($script:LogQueue, plain values) cross over. A
+        # short DispatcherTimer reaps the runspace once the call completes (mirrors Start-BackgroundWork).
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'MTA'
+        $rs.ThreadOptions  = 'ReuseThread'
+        $rs.Open()
+        $rs.SessionStateProxy.SetVariable('Queue',   $script:LogQueue)
+        $rs.SessionStateProxy.SetVariable('Uri',     $uri)
+        $rs.SessionStateProxy.SetVariable('Body',    $body)
+        $rs.SessionStateProxy.SetVariable('Headers', $headers)
+
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript({
+            try {
+                [void](Invoke-RestMethod -Method Post -Uri $Uri -Body $Body -ContentType 'application/json' -Headers $Headers -TimeoutSec 5)
+            } catch {
+                # A 404 (no active prep for this S/N) or any network error is harmless — best-effort log only.
+                try { $Queue.Enqueue('PCD9000: kunne ikke sende status') } catch {}
+            }
+        })
+        $handle = $ps.BeginInvoke()
+
+        # Reap on completion. State on the timer's Tag (not a closure), like Start-BackgroundWork.
+        $reaper = New-Object System.Windows.Threading.DispatcherTimer
+        $reaper.Interval = [TimeSpan]::FromMilliseconds(250)
+        $reaper.Tag = @{ Handle = $handle; PS = $ps; RS = $rs }
+        $reaper.Add_Tick({
+            $s = $this.Tag
+            # Note: a best-effort failure line is enqueued to $script:LogQueue and drained by the
+            # existing Start-BackgroundWork timer's log pump; we don't drain here so we never
+            # mislabel another round's INFO lines. This reaper only disposes the runspace.
+            if ($s.Handle.IsCompleted) {
+                $this.Stop()
+                try { $s.PS.EndInvoke($s.Handle) } catch {}
+                try { $s.PS.Dispose(); $s.RS.Dispose() } catch {}
+            }
+        })
+        $reaper.Start()
+    } catch {
+        # Never throw from a status report.
+        try { $script:LogQueue.Enqueue('PCD9000: kunne ikke sende status') } catch {}
+    }
+}
+
+# Convenience: report a single check.
+function Set-PcdCheck {
+    param([string]$Key, [string]$Label, [string]$Status, [string]$Message)
+    Send-PcdReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
+}
+#endregion
+
 #region ---------------------------------------------------------- No Sleep
 function Set-KeepAwake {
     param([bool]$On)
@@ -706,6 +795,7 @@ function Invoke-GrsRefresh {
             if ($res.ImeRestarted) { $summary += ', IME genstartet' }
             elseif ($res.ImeMissing) { $summary += ', IME ikke fundet' }
             $script:UI.TxtGrsStatus.Text = $summary
+            Set-PcdCheck 'apps' 'Apps/Intune' 'running' 'GRS ryddet, geninstallerer'
             if ($script:SeqRunning) { $script:UI.TxtAutoStatus.Text = "GRS udført kl. $((Get-Date).ToString('HH:mm')) — holder maskinen vågen. Tryk Stop for at afslutte." }
         } else {
             $script:UI.TxtGrsStatus.Text = 'Færdig (se log).'
@@ -1039,8 +1129,17 @@ function Start-WuDrive {
         param($res)
         $script:WuDriveBusy = $false
         if ($res -is [hashtable]) {
-            if ($res.Error) { Write-LogLine "Windows Update fejlede: $($res.Error)" 'ERROR' }
-            else { Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed) }
+            if ($res.Error) {
+                Write-LogLine "Windows Update fejlede: $($res.Error)" 'ERROR'
+                Set-PcdCheck 'windows_update' 'Windows Update' 'fail' $res.Error
+            }
+            else {
+                Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed)
+                Set-PcdCheck 'windows_update' 'Windows Update' 'ok' ("{0} installeret" -f $res.Installed)
+                # In the resume (post-login) flow a clean WU round means provisioning has settled.
+                if ($script:CedraResuming) { Set-PcdCheck 'provisioning' 'Klargøring' 'ok' 'Klar' }
+            }
+            if ($res.Reboot) { Set-PcdCheck 'reboot' 'Genstart' 'warn' 'Mangler genstart' }
         }
         Update-WuStatus
     }
@@ -1088,11 +1187,13 @@ $script:RestartXaml = @'
 function Invoke-DeviceRestart {
     if ($script:RestartTimer) { $script:RestartTimer.Stop() }
     Write-LogLine 'CedraDeploy: genstarter enheden'
+    Set-PcdCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     try { Restart-Computer -Force } catch { Write-LogLine "Genstart fejlede: $($_.Exception.Message)" 'ERROR' }
 }
 
 function Start-RestartCountdown {
     param([int]$Seconds = 60)
+    Set-PcdCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:RestartXaml)
     $w = [Windows.Markup.XamlReader]::Load($reader)
     try { $w.Owner = $script:Window } catch {}
@@ -1164,6 +1265,7 @@ function Start-CedraFlow {
     $script:UI.TxtAutoMinutes.IsEnabled = $false
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
+    Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'CedraStandard'
     Start-WuDrive
     Start-WuCadence
 
@@ -1211,11 +1313,13 @@ function Stop-CedraFlow {
 function Start-CedraResume {
     Remove-CedraResumeTask   # one-shot: never run again
     if (-not $script:IsAdmin) { $script:UI.TxtNoSleepStatus.Text = 'Kræver administrator.'; Write-LogLine 'CedraDeploy resume kræver administrator' 'WARN'; return }
+    $script:CedraResuming = $true   # let the shared WU OnComplete mark provisioning "Klar" after a good round
     Set-KeepAwake $true
     Update-Chips
     Show-Panel 'PanelNoSleep' $(if ($script:Profile) { $script:Profile.Brand } else { 'CedraDeploy' })
     $script:UI.TxtNoSleepStatus.Text = 'CedraDeploy genoptagelse — anti-sleep aktiv, Windows Update kører.'
     Write-LogLine 'CedraDeploy resume: anti-sleep + Windows Update'
+    Set-PcdCheck 'provisioning' 'Klargøring' 'running' 'Genoptager efter login'
     Start-WuDrive
     Start-WuCadence
 }
