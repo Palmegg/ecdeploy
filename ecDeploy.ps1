@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.2'
+$script:Version = '1.4.3'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1369,15 +1369,30 @@ $script:CompanyPortalWork = {
         $bundle = Join-Path $tmp $manifest.bundle
         $Queue.Enqueue('Firmaportal: henter pakker...')
         Invoke-WebRequest "$base/$($manifest.bundle)" -OutFile $bundle -UseBasicParsing -TimeoutSec 180
+
+        # Only fetch/install dependencies that are MISSING. Reinstalling a framework that's already
+        # present (and in use by e.g. WebExperience) triggers 0x80073D02 "resources in use".
         $deps = @()
-        foreach ($d in $manifest.deps) { $dp = Join-Path $tmp $d; Invoke-WebRequest "$base/$d" -OutFile $dp -UseBasicParsing -TimeoutSec 180; $deps += $dp }
+        foreach ($d in $manifest.deps) {
+            $depName = ($d -split '_')[0]
+            if (Get-AppxPackage -Name $depName -ErrorAction SilentlyContinue) { $Queue.Enqueue("Dependency findes allerede, springer over: $depName"); continue }
+            $dp = Join-Path $tmp $d; Invoke-WebRequest "$base/$d" -OutFile $dp -UseBasicParsing -TimeoutSec 180; $deps += $dp
+        }
 
         $Queue.Enqueue('Firmaportal: installerer for nuværende bruger...')
-        try { Add-AppxPackage -Path $bundle -DependencyPath $deps -ErrorAction Stop; $res.Installed = $true; $Queue.Enqueue('Firmaportal installeret for brugeren') }
-        catch { $Queue.Enqueue("Firmaportal (bruger) fejl: $($_.Exception.Message)") }
+        try {
+            $p = @{ Path = $bundle; ForceApplicationShutdown = $true; ErrorAction = 'Stop' }
+            if ($deps.Count -gt 0) { $p.DependencyPath = $deps }
+            Add-AppxPackage @p
+            $res.Installed = $true; $Queue.Enqueue('Firmaportal installeret for brugeren')
+        } catch { $Queue.Enqueue("Firmaportal (bruger) fejl: $($_.Exception.Message)") }
 
-        try { Add-AppxProvisionedPackage -Online -PackagePath $bundle -DependencyPackagePath $deps -SkipLicense -ErrorAction Stop | Out-Null; $res.Provisioned = $true; $Queue.Enqueue('Firmaportal provisioneret (alle brugere)') }
-        catch { $Queue.Enqueue("Firmaportal (alle brugere) sprunget over: $($_.Exception.Message)") }
+        try {
+            $pp = @{ Online = $true; PackagePath = $bundle; SkipLicense = $true; ErrorAction = 'Stop' }
+            if ($deps.Count -gt 0) { $pp.DependencyPackagePath = $deps }
+            Add-AppxProvisionedPackage @pp | Out-Null
+            $res.Provisioned = $true; $Queue.Enqueue('Firmaportal provisioneret (alle brugere)')
+        } catch { $Queue.Enqueue("Firmaportal (alle brugere) sprunget over: $($_.Exception.Message)") }
     } catch { $res.Error = $_.Exception.Message; $Queue.Enqueue("Firmaportal FEJL: $($_.Exception.Message)") }
     return $res
 }
