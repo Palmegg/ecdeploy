@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.3'
+$script:Version = '1.4.4'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -177,6 +177,12 @@ $script:Customers = @{
             '8d8ff2c8-9e91-464a-b2c7-ea8e92546caa' = 'Firmaportal'
             '67391164-7e55-47cb-8ca5-5fa9116d85f8' = 'Jabra Direct'
             '4e1fefc1-8986-48ba-ad18-d57251e23bc9' = 'Logitech Options+'
+        }
+        # Apps installed directly by CedraDeploy (not via Intune) — checked via Get-AppxPackage by
+        # friendly name instead of the IME/registry, and excluded from the Intune-app badges.
+        # Map: friendly name -> appx package family name.
+        PcdAppxChecks = @{
+            'Firmaportal' = 'Microsoft.CompanyPortal'
         }
     }
 }
@@ -641,10 +647,12 @@ $script:PcdSessionId = [guid]::NewGuid().ToString()
 $script:PcdBaseUrl  = $null
 $script:PcdApiKey   = $null
 $script:PcdAppNames = @{}
+$script:PcdAppxChecks = @{}
 if ($script:Profile) {
     if ($script:Profile.ContainsKey('PcdBaseUrl')) { $script:PcdBaseUrl = $script:Profile.PcdBaseUrl }
     if ($script:Profile.ContainsKey('PcdApiKey'))  { $script:PcdApiKey  = $script:Profile.PcdApiKey }
     if ($script:Profile.ContainsKey('PcdAppNames')) { $script:PcdAppNames = $script:Profile.PcdAppNames }
+    if ($script:Profile.ContainsKey('PcdAppxChecks')) { $script:PcdAppxChecks = $script:Profile.PcdAppxChecks }
 }
 
 # Central master switch: PCD9000 is only ever active when a customer profile supplied a PcdBaseUrl
@@ -740,6 +748,8 @@ function Report-PcdStatus {
                 $gid = $matches[1].ToLower()
                 if ($script:PcdAppNames.ContainsKey($gid)) { $name = $script:PcdAppNames[$gid] }
             }
+            # Apps installed directly by CedraDeploy are reported via the appx check below, not Intune.
+            if ($script:PcdAppxChecks.ContainsKey($name)) { continue }
             switch ($a.Cat) {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
                 'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
@@ -748,6 +758,19 @@ function Report-PcdStatus {
             }
         }
         if ($checks.Count -gt 0) { Send-PcdReport $checks }
+    }
+
+    # Apps installed directly by CedraDeploy (e.g. Company Portal) — report from the actual appx
+    # package via Get-AppxPackage, not the Intune/IME registry (which never sees a direct install).
+    if ($script:PcdAppxChecks.Count -gt 0) {
+        $appxChecks = @()
+        foreach ($entry in $script:PcdAppxChecks.GetEnumerator()) {
+            $installed = $false
+            try { if (Get-AppxPackage -Name $entry.Value -ErrorAction SilentlyContinue) { $installed = $true } } catch {}
+            if ($installed) { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) OK"; status = 'ok'; message = '' } }
+            else            { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) mangler"; status = 'warn'; message = '' } }
+        }
+        if ($appxChecks.Count -gt 0) { Send-PcdReport $appxChecks }
     }
 
     # Windows Update + reboot: read-only status snapshot ($script:WuWork). 'running' when a WU drive
