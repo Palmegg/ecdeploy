@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.1'
+$script:Version = '1.4.2'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1348,6 +1348,51 @@ function Remove-CedraResumeTask {
     try { Unregister-ScheduledTask -TaskName 'CedraDeploy-Resume' -Confirm:$false -ErrorAction SilentlyContinue; Write-LogLine 'Resume-opgave fjernet' } catch {}
 }
 
+# Pre-install Company Portal from a hosted MSIX set (no winget dependency). The package set + a
+# manifest.json live under /assets/companyportal/ on the ecDeploy host (binaries are server-only,
+# gitignored). Installs for the current user (immediate) + provisions for all users (best-effort),
+# so the tech can open Company Portal and click "Sign in" to kick off the Intune sync.
+$script:CompanyPortalWork = {
+    $res = @{ Already = $false; Installed = $false; Provisioned = $false; Error = $null }
+    try { if (Get-AppxPackage -Name 'Microsoft.CompanyPortal' -ErrorAction SilentlyContinue) { $res.Already = $true; $Queue.Enqueue('Firmaportal er allerede installeret'); return $res } } catch {}
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+    $manifest = $null; $base = $null
+    foreach ($h in @('https://ecd.qwe.dk', 'http://ecd.palme3.dk')) {
+        try { $manifest = Invoke-RestMethod "$h/assets/companyportal/manifest.json" -TimeoutSec 20 -UseBasicParsing; $base = "$h/assets/companyportal"; break } catch {}
+    }
+    if (-not $manifest -or -not $manifest.bundle) { $Queue.Enqueue('Firmaportal: pakker er ikke hostet endnu (manifest mangler)'); $res.Error = 'no-manifest'; return $res }
+
+    $tmp = Join-Path $env:TEMP 'ecd-companyportal'
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        $bundle = Join-Path $tmp $manifest.bundle
+        $Queue.Enqueue('Firmaportal: henter pakker...')
+        Invoke-WebRequest "$base/$($manifest.bundle)" -OutFile $bundle -UseBasicParsing -TimeoutSec 180
+        $deps = @()
+        foreach ($d in $manifest.deps) { $dp = Join-Path $tmp $d; Invoke-WebRequest "$base/$d" -OutFile $dp -UseBasicParsing -TimeoutSec 180; $deps += $dp }
+
+        $Queue.Enqueue('Firmaportal: installerer for nuværende bruger...')
+        try { Add-AppxPackage -Path $bundle -DependencyPath $deps -ErrorAction Stop; $res.Installed = $true; $Queue.Enqueue('Firmaportal installeret for brugeren') }
+        catch { $Queue.Enqueue("Firmaportal (bruger) fejl: $($_.Exception.Message)") }
+
+        try { Add-AppxProvisionedPackage -Online -PackagePath $bundle -DependencyPackagePath $deps -SkipLicense -ErrorAction Stop | Out-Null; $res.Provisioned = $true; $Queue.Enqueue('Firmaportal provisioneret (alle brugere)') }
+        catch { $Queue.Enqueue("Firmaportal (alle brugere) sprunget over: $($_.Exception.Message)") }
+    } catch { $res.Error = $_.Exception.Message; $Queue.Enqueue("Firmaportal FEJL: $($_.Exception.Message)") }
+    return $res
+}
+
+function Install-CompanyPortal {
+    Write-LogLine 'Firmaportal: starter pre-installation...'
+    Start-BackgroundWork -Work $script:CompanyPortalWork -OnComplete {
+        param($res)
+        if ($res -isnot [hashtable]) { Write-LogLine 'Firmaportal: ukendt resultat' 'WARN'; return }
+        if ($res.Already)        { Write-LogLine 'Firmaportal var allerede installeret' }
+        elseif ($res.Installed)  { Write-LogLine 'Firmaportal installeret — åbn den og tryk Log ind for at starte Intune-sync' }
+        elseif ($res.Error)      { Write-LogLine 'Firmaportal kunne ikke installeres (se log)' 'WARN' }
+    }
+}
+
 # CedraStandard: anti-sleep + Windows Update now, GRS after 45 min, restart after 90 min,
 # and a one-shot resume task so the next logon resumes (anti-sleep only + Windows Update).
 function Start-CedraFlow {
@@ -1374,6 +1419,7 @@ function Start-CedraFlow {
     Set-PcdCheck 'provisioning' 'CedraDeploy kører' 'running' 'CedraStandard'
     Start-WuDrive
     Start-WuCadence
+    Install-CompanyPortal   # pre-install Company Portal so the tech can sign in (kicks off Intune sync)
     Report-PcdStatus      # immediate first board update
     Start-PcdCadence      # then refresh app/WU badges every 60 s
 

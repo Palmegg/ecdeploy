@@ -1,3 +1,4 @@
 .env
 tools/_*.png
 tools/_*.b64
+assets/
