@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.5'
+$script:Version = '1.4.6'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -735,7 +735,8 @@ function Report-PcdStatus {
     if (-not $script:PcdEnabled) { return }
     if (-not $script:DeviceSerial) { return }
 
-    # Apps: one badge per Intune Win32 app, by friendly name. Skip 'Unknown' to avoid noise.
+    # Apps: one badge per PRE-DEFINED Intune Win32 app (PcdAppNames), by friendly name.
+    # Undefined apps (and the GRS key) are skipped entirely.
     Start-BackgroundWork -Work $script:AppStatusWork -OnComplete {
         param($res)
         if (-not ($res -is [hashtable]) -or -not $res.Apps) { return }
@@ -743,12 +744,15 @@ function Report-PcdStatus {
         foreach ($a in $res.Apps) {
             # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
             # revision suffix is ignored) and look it up; otherwise fall back to $a.Name (IME-log map / GUID).
-            $name = $a.Name
+            # Vis KUN apps vi har pre-defineret i PcdAppNames — skip alt andet (GRS-nøglen og
+            # udefinerede apps som fx en ny BitLocker-app). Kun rigtige app-GUID'er i tabellen.
+            $gid = $null
             if ("$($a.Id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
                 $gid = $matches[1].ToLower()
-                if ($script:PcdAppNames.ContainsKey($gid)) { $name = $script:PcdAppNames[$gid] }
             }
-            # Apps installed directly by CedraDeploy are reported via the appx check below, not Intune.
+            if (-not $gid -or -not $script:PcdAppNames.ContainsKey($gid)) { continue }
+            $name = $script:PcdAppNames[$gid]
+            # Apps der dækkes af et Appx-check rapporteres derfra (ikke via Intune-registret).
             if ($script:PcdAppxChecks.ContainsKey($name)) { continue }
             switch ($a.Cat) {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
