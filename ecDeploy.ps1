@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.4.4'
+$script:Version = '1.4.5'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1425,9 +1425,36 @@ function Install-CompanyPortal {
     Start-BackgroundWork -Work $script:CompanyPortalWork -OnComplete {
         param($res)
         if ($res -isnot [hashtable]) { Write-LogLine 'Firmaportal: ukendt resultat' 'WARN'; return }
-        if ($res.Already)        { Write-LogLine 'Firmaportal var allerede installeret' }
-        elseif ($res.Installed)  { Write-LogLine 'Firmaportal installeret — åbn den og tryk Log ind for at starte Intune-sync' }
+        $present = $false
+        if ($res.Already)        { Write-LogLine 'Firmaportal var allerede installeret'; $present = $true }
+        elseif ($res.Installed)  { Write-LogLine 'Firmaportal installeret'; $present = $true }
         elseif ($res.Error)      { Write-LogLine 'Firmaportal kunne ikke installeres (se log)' 'WARN' }
+        if ($present) { Start-IntuneSync }   # kick off an Intune/MDM sync now Company Portal is in place
+    }
+}
+
+# Trigger an Intune/MDM device sync (same as Company Portal's "Sync") by starting the device's
+# EnterpriseMgmt "PushLaunch" scheduled task — no Company Portal sign-in required.
+$script:IntuneSyncWork = {
+    $res = @{ Triggered = $false; Count = 0; Error = $null }
+    try {
+        $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -like '\Microsoft\Windows\EnterpriseMgmt\*' }
+        $push = @($tasks | Where-Object { $_.TaskName -eq 'PushLaunch' })
+        if ($push.Count -eq 0) { $push = @($tasks) }   # fallback: all enrollment tasks
+        foreach ($t in $push) { try { Start-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName -ErrorAction Stop; $res.Count++ } catch {} }
+        $res.Triggered = $res.Count -gt 0
+        if ($res.Triggered) { $Queue.Enqueue("Intune-sync startet ($($res.Count) opgave(r))") }
+        else { $Queue.Enqueue('Intune-sync: ingen MDM-enrollment-opgaver fundet (enheden er måske ikke Intune-enrolled endnu)') }
+    } catch { $res.Error = $_.Exception.Message; $Queue.Enqueue("Intune-sync FEJL: $($_.Exception.Message)") }
+    return $res
+}
+
+function Start-IntuneSync {
+    Write-LogLine 'Starter Intune-sync...'
+    Start-BackgroundWork -Work $script:IntuneSyncWork -OnComplete {
+        param($res)
+        if ($res -is [hashtable] -and $res.Triggered) { Write-LogLine "Intune-sync startet ($($res.Count) opgave(r))" }
+        else { Write-LogLine 'Intune-sync kunne ikke startes (se log)' 'WARN' }
     }
 }
 
