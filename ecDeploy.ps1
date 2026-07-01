@@ -162,14 +162,14 @@ $script:Customers = @{
         Accent      = '#14B8A6'
         AccentHover = '#0D9488'
         LogoB64     = $script:CedraLogoB64
-        # PCD9000 status board. This script is served publicly, so NO secret goes here — the
+        # ecFleet status board. This script is served publicly, so NO secret goes here — the
         # safeguard is that /agent/report is internal-only and you must hit a valid in-progress S/N.
-        # PcdBaseUrl is just an internal URL (not a secret). PcdApiKey stays empty (auth off server-side).
-        PcdBaseUrl  = 'http://10.10.20.27:5173/api'
-        PcdApiKey   = ''
+        # EcfBaseUrl is just an internal URL (not a secret). EcfApiKey stays empty (auth off server-side).
+        EcfBaseUrl  = 'http://10.10.20.27:5173/api'
+        EcfApiKey   = ''
         # GUID -> friendly name for Intune Win32 apps (the registry only exposes GUIDs). Keyed by the
         # base GUID (the IME app id without any "_1" revision suffix), lowercase.
-        PcdAppNames = @{
+        EcfAppNames = @{
             '3b61435b-92b3-400b-99d9-5e710244ae7b' = '7-Zip'
             '92680d28-18b2-47b8-9acd-21c0c35f3abf' = 'AdminRemover'
             'e621fc1f-a00a-4e67-9d32-734e59303bc3' = 'Adobe Reader'
@@ -181,7 +181,7 @@ $script:Customers = @{
         # Apps installed directly by CedraDeploy (not via Intune) — checked via Get-AppxPackage by
         # friendly name instead of the IME/registry, and excluded from the Intune-app badges.
         # Map: friendly name -> appx package family name.
-        PcdAppxChecks = @{
+        EcfAppxChecks = @{
             'Firmaportal' = 'Microsoft.CompanyPortal'
         }
     }
@@ -203,7 +203,7 @@ $script:SeqGrsFired   = $false
 $script:AutoStart     = [bool]$AutoSequence   # auto-start the sequence once the window is loaded
 $script:FlowName      = $Flow                 # customer flow to run on load (CedraStandard/CedraResume)
 $script:CedraRunning  = $false
-$script:CedraResuming = $false   # true while the post-login resume flow is active (PCD9000 reporting)
+$script:CedraResuming = $false   # true while the post-login resume flow is active (ecFleet reporting)
 $script:WuDriveBusy   = $false
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
@@ -622,14 +622,14 @@ function Start-BackgroundWork {
 }
 #endregion
 
-#region ---------------------------------------------------------- PCD9000 reporting
-# Report provisioning status to PcDeployer9000 so this machine's serial number is tied to a
+#region ---------------------------------------------------------- ecFleet reporting
+# Report provisioning status to ecFleet so this machine's serial number is tied to a
 # station and shown live on a board. Strictly fire-and-forget: a 404 (no active prep for this
 # S/N) or any network error is harmless and must never block the UI thread or throw.
 #
-# PCD9000-integration er KUN aktiv under en customer-profil med PcdBaseUrl (p.t. CedraDanmark).
+# ecFleet-integration er KUN aktiv under en customer-profil med EcfBaseUrl (p.t. CedraDanmark).
 # Den generiske ecDeploy (irm ecd.qwe.dk | iex, ingen -Customer) aktiverer intet af dette — alle
-# funktioner returnerer straks når $script:PcdEnabled er $false. Hooks i generiske handlinger
+# funktioner returnerer straks når $script:EcfEnabled er $false. Hooks i generiske handlinger
 # (fx Opdater GRS) er rene no-ops uden en Cedra-profil.
 
 # Capture the BIOS serial once at startup (tolerate failure — leave $null).
@@ -641,35 +641,35 @@ try {
 
 # A fresh session id per ecDeploy run. The server resets this machine's board badges whenever the
 # id changes, so a new run (e.g. after a reinstall) clears stale badges from the previous run.
-$script:PcdSessionId = [guid]::NewGuid().ToString()
+$script:EcfSessionId = [guid]::NewGuid().ToString()
 
 # Read endpoint config from the active customer profile (null-safe).
-$script:PcdBaseUrl  = $null
-$script:PcdApiKey   = $null
-$script:PcdAppNames = @{}
-$script:PcdAppxChecks = @{}
+$script:EcfBaseUrl  = $null
+$script:EcfApiKey   = $null
+$script:EcfAppNames = @{}
+$script:EcfAppxChecks = @{}
 if ($script:Profile) {
-    if ($script:Profile.ContainsKey('PcdBaseUrl')) { $script:PcdBaseUrl = $script:Profile.PcdBaseUrl }
-    if ($script:Profile.ContainsKey('PcdApiKey'))  { $script:PcdApiKey  = $script:Profile.PcdApiKey }
-    if ($script:Profile.ContainsKey('PcdAppNames')) { $script:PcdAppNames = $script:Profile.PcdAppNames }
-    if ($script:Profile.ContainsKey('PcdAppxChecks')) { $script:PcdAppxChecks = $script:Profile.PcdAppxChecks }
+    if ($script:Profile.ContainsKey('EcfBaseUrl')) { $script:EcfBaseUrl = $script:Profile.EcfBaseUrl }
+    if ($script:Profile.ContainsKey('EcfApiKey'))  { $script:EcfApiKey  = $script:Profile.EcfApiKey }
+    if ($script:Profile.ContainsKey('EcfAppNames')) { $script:EcfAppNames = $script:Profile.EcfAppNames }
+    if ($script:Profile.ContainsKey('EcfAppxChecks')) { $script:EcfAppxChecks = $script:Profile.EcfAppxChecks }
 }
 
-# Central master switch: PCD9000 is only ever active when a customer profile supplied a PcdBaseUrl
-# (i.e. CedraDanmark). Generic ecDeploy leaves this $false and every PCD9000 function no-ops.
-$script:PcdEnabled = [bool]$script:PcdBaseUrl
+# Central master switch: ecFleet is only ever active when a customer profile supplied a EcfBaseUrl
+# (i.e. CedraDanmark). Generic ecDeploy leaves this $false and every ecFleet function no-ops.
+$script:EcfEnabled = [bool]$script:EcfBaseUrl
 
-# POST a batch of checks to PCD9000 on a background runspace. The server merges checks by 'key'.
-function Send-PcdReport {
+# POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
+function Send-EcfReport {
     param([object[]]$Checks)
-    if (-not $script:PcdEnabled) { return }
-    if (-not $script:PcdBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
+    if (-not $script:EcfEnabled) { return }
+    if (-not $script:EcfBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
-        $body = @{ serialNumber = $script:DeviceSerial; session = $script:PcdSessionId; checks = $Checks } | ConvertTo-Json -Depth 6
-        $uri  = "$script:PcdBaseUrl/agent/report"
+        $body = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks } | ConvertTo-Json -Depth 6
+        $uri  = "$script:EcfBaseUrl/agent/report"
         $headers = @{}
-        if ($script:PcdApiKey) { $headers['X-Api-Key'] = $script:PcdApiKey }
+        if ($script:EcfApiKey) { $headers['X-Api-Key'] = $script:EcfApiKey }
 
         # Fire on a background runspace so the HTTP call never touches the UI thread and never
         # blocks it. Only runspace-safe objects ($script:LogQueue, plain values) cross over. A
@@ -693,7 +693,7 @@ function Send-PcdReport {
                 [void](Invoke-RestMethod -Method Post -Uri $Uri -Body $bytes -ContentType 'application/json; charset=utf-8' -Headers $Headers -TimeoutSec 5)
             } catch {
                 # A 404 (no active prep for this S/N) or any network error is harmless — best-effort log only.
-                try { $Queue.Enqueue('PCD9000: kunne ikke sende status') } catch {}
+                try { $Queue.Enqueue('ecFleet: kunne ikke sende status') } catch {}
             }
         })
         $handle = $ps.BeginInvoke()
@@ -716,26 +716,26 @@ function Send-PcdReport {
         $reaper.Start()
     } catch {
         # Never throw from a status report.
-        try { $script:LogQueue.Enqueue('PCD9000: kunne ikke sende status') } catch {}
+        try { $script:LogQueue.Enqueue('ecFleet: kunne ikke sende status') } catch {}
     }
 }
 
 # Convenience: report a single check.
-function Set-PcdCheck {
+function Set-EcfCheck {
     param([string]$Key, [string]$Label, [string]$Status, [string]$Message)
-    if (-not $script:PcdEnabled) { return }
-    Send-PcdReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
+    if (-not $script:EcfEnabled) { return }
+    Send-EcfReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
 }
 
-# Gather named app + Windows Update status and report them as PCD9000 badges. Each part runs on
+# Gather named app + Windows Update status and report them as ecFleet badges. Each part runs on
 # its own background runspace via Start-BackgroundWork (same pattern as Update-AppStatus /
 # Update-WuStatus); the checks are built in the OnComplete callback (UI thread — safe) and each
 # part sends its own batch. Non-blocking and best-effort: returns immediately when not configured.
-function Report-PcdStatus {
-    if (-not $script:PcdEnabled) { return }
+function Report-EcfStatus {
+    if (-not $script:EcfEnabled) { return }
     if (-not $script:DeviceSerial) { return }
 
-    # Apps: one badge per PRE-DEFINED Intune Win32 app (PcdAppNames), by friendly name.
+    # Apps: one badge per PRE-DEFINED Intune Win32 app (EcfAppNames), by friendly name.
     # Undefined apps (and the GRS key) are skipped entirely.
     Start-BackgroundWork -Work $script:AppStatusWork -OnComplete {
         param($res)
@@ -744,16 +744,16 @@ function Report-PcdStatus {
         foreach ($a in $res.Apps) {
             # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
             # revision suffix is ignored) and look it up; otherwise fall back to $a.Name (IME-log map / GUID).
-            # Vis KUN apps vi har pre-defineret i PcdAppNames — skip alt andet (GRS-nøglen og
+            # Vis KUN apps vi har pre-defineret i EcfAppNames — skip alt andet (GRS-nøglen og
             # udefinerede apps som fx en ny BitLocker-app). Kun rigtige app-GUID'er i tabellen.
             $gid = $null
             if ("$($a.Id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
                 $gid = $matches[1].ToLower()
             }
-            if (-not $gid -or -not $script:PcdAppNames.ContainsKey($gid)) { continue }
-            $name = $script:PcdAppNames[$gid]
+            if (-not $gid -or -not $script:EcfAppNames.ContainsKey($gid)) { continue }
+            $name = $script:EcfAppNames[$gid]
             # Apps der dækkes af et Appx-check rapporteres derfra (ikke via Intune-registret).
-            if ($script:PcdAppxChecks.ContainsKey($name)) { continue }
+            if ($script:EcfAppxChecks.ContainsKey($name)) { continue }
             switch ($a.Cat) {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
                 'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
@@ -761,20 +761,20 @@ function Report-PcdStatus {
                 default     { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }   # Unknown — orange, same as Pending
             }
         }
-        if ($checks.Count -gt 0) { Send-PcdReport $checks }
+        if ($checks.Count -gt 0) { Send-EcfReport $checks }
     }
 
     # Apps installed directly by CedraDeploy (e.g. Company Portal) — report from the actual appx
     # package via Get-AppxPackage, not the Intune/IME registry (which never sees a direct install).
-    if ($script:PcdAppxChecks.Count -gt 0) {
+    if ($script:EcfAppxChecks.Count -gt 0) {
         $appxChecks = @()
-        foreach ($entry in $script:PcdAppxChecks.GetEnumerator()) {
+        foreach ($entry in $script:EcfAppxChecks.GetEnumerator()) {
             $installed = $false
             try { if (Get-AppxPackage -Name $entry.Value -ErrorAction SilentlyContinue) { $installed = $true } } catch {}
             if ($installed) { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) OK"; status = 'ok'; message = '' } }
             else            { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) mangler"; status = 'warn'; message = '' } }
         }
-        if ($appxChecks.Count -gt 0) { Send-PcdReport $appxChecks }
+        if ($appxChecks.Count -gt 0) { Send-EcfReport $appxChecks }
     }
 
     # Windows Update + reboot: read-only status snapshot ($script:WuWork). 'running' when a WU drive
@@ -796,23 +796,23 @@ function Report-PcdStatus {
         } else {
             $checks += @{ key = 'reboot'; label = 'Genstart OK'; status = 'ok'; message = '' }
         }
-        Send-PcdReport $checks
+        Send-EcfReport $checks
     }
 }
 
-# Report PCD9000 status on a cadence (60 s) while a Cedra flow is active.
-function Start-PcdCadence {
-    if (-not $script:PcdEnabled) { return }
-    if (-not $script:PcdCadenceTimer) {
-        $script:PcdCadenceTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:PcdCadenceTimer.Interval = [TimeSpan]::FromSeconds(60)
-        $script:PcdCadenceTimer.Add_Tick({ Report-PcdStatus })
+# Report ecFleet status on a cadence (60 s) while a Cedra flow is active.
+function Start-EcfCadence {
+    if (-not $script:EcfEnabled) { return }
+    if (-not $script:EcfCadenceTimer) {
+        $script:EcfCadenceTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:EcfCadenceTimer.Interval = [TimeSpan]::FromSeconds(60)
+        $script:EcfCadenceTimer.Add_Tick({ Report-EcfStatus })
     }
-    $script:PcdCadenceTimer.Start()
+    $script:EcfCadenceTimer.Start()
 }
 
-function Stop-PcdCadence {
-    if ($script:PcdCadenceTimer) { $script:PcdCadenceTimer.Stop() }
+function Stop-EcfCadence {
+    if ($script:EcfCadenceTimer) { $script:EcfCadenceTimer.Stop() }
 }
 #endregion
 
@@ -928,7 +928,7 @@ function Invoke-GrsRefresh {
             $script:UI.TxtGrsStatus.Text = 'Færdig (se log).'
         }
         if (-not $script:SeqRunning) { $script:UI.BtnRunGrs.IsEnabled = $true }
-        Report-PcdStatus   # GRS just re-evaluated apps — refresh the board now
+        Report-EcfStatus   # GRS just re-evaluated apps — refresh the board now
     }
 }
 #endregion
@@ -1269,12 +1269,12 @@ function Start-WuDrive {
             else {
                 Write-LogLine ("Windows Update-runde: {0} installeret, {1} fejlet" -f $res.Installed, $res.Failed)
                 # In the resume (post-login) flow a clean WU round means provisioning has settled.
-                if ($script:CedraResuming) { Set-PcdCheck 'provisioning' 'CedraDeploy klar' 'ok' 'Klar' }
+                if ($script:CedraResuming) { Set-EcfCheck 'provisioning' 'CedraDeploy klar' 'ok' 'Klar' }
             }
         }
         Update-WuStatus
-        # WU/reboot/app badges are driven entirely by Report-PcdStatus — refresh now for a quick update.
-        Report-PcdStatus
+        # WU/reboot/app badges are driven entirely by Report-EcfStatus — refresh now for a quick update.
+        Report-EcfStatus
     }
 }
 
@@ -1320,13 +1320,13 @@ $script:RestartXaml = @'
 function Invoke-DeviceRestart {
     if ($script:RestartTimer) { $script:RestartTimer.Stop() }
     Write-LogLine 'CedraDeploy: genstarter enheden'
-    Set-PcdCheck 'reboot' 'Genstart' 'running' 'Genstarter'
+    Set-EcfCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     try { Restart-Computer -Force } catch { Write-LogLine "Genstart fejlede: $($_.Exception.Message)" 'ERROR' }
 }
 
 function Start-RestartCountdown {
     param([int]$Seconds = 60)
-    Set-PcdCheck 'reboot' 'Genstart' 'running' 'Genstarter'
+    Set-EcfCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:RestartXaml)
     $w = [Windows.Markup.XamlReader]::Load($reader)
     try { $w.Owner = $script:Window } catch {}
@@ -1485,12 +1485,12 @@ function Start-CedraFlow {
     $script:UI.TxtAutoMinutes.IsEnabled = $false
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
-    Set-PcdCheck 'provisioning' 'CedraDeploy kører' 'running' 'CedraStandard'
+    Set-EcfCheck 'provisioning' 'CedraDeploy kører' 'running' 'CedraStandard'
     Start-WuDrive
     Start-WuCadence
     Install-CompanyPortal   # pre-install Company Portal so the tech can sign in (kicks off Intune sync)
-    Report-PcdStatus      # immediate first board update
-    Start-PcdCadence      # then refresh app/WU badges every 60 s
+    Report-EcfStatus      # immediate first board update
+    Start-EcfCadence      # then refresh app/WU badges every 60 s
 
     if (-not $script:CedraTimer) {
         $script:CedraTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -1523,7 +1523,7 @@ function Start-CedraFlow {
 function Stop-CedraFlow {
     if ($script:CedraTimer) { $script:CedraTimer.Stop() }
     Stop-WuCadence
-    Stop-PcdCadence
+    Stop-EcfCadence
     $script:CedraRunning = $false
     Set-KeepAwake $false
     $script:UI.BarAuto.Value = 0
@@ -1543,11 +1543,11 @@ function Start-CedraResume {
     Show-Panel 'PanelNoSleep' $(if ($script:Profile) { $script:Profile.Brand } else { 'CedraDeploy' })
     $script:UI.TxtNoSleepStatus.Text = 'CedraDeploy genoptagelse — anti-sleep aktiv, Windows Update kører.'
     Write-LogLine 'CedraDeploy resume: anti-sleep + Windows Update'
-    Set-PcdCheck 'provisioning' 'CedraDeploy kører' 'running' 'Genoptager efter login'
+    Set-EcfCheck 'provisioning' 'CedraDeploy kører' 'running' 'Genoptager efter login'
     Start-WuDrive
     Start-WuCadence
-    Report-PcdStatus      # immediate first board update
-    Start-PcdCadence      # then refresh app/WU badges every 60 s
+    Report-EcfStatus      # immediate first board update
+    Start-EcfCadence      # then refresh app/WU badges every 60 s
 }
 #endregion
 
