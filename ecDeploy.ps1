@@ -164,9 +164,10 @@ $script:Customers = @{
         LogoB64     = $script:CedraLogoB64
         # ecFleet status board. This script is served publicly, so NO secret goes here — the
         # safeguard is that /agent/report is internal-only and you must hit a valid in-progress S/N.
-        # EcfBaseUrl is just an internal URL (not a secret). EcfApiKey stays empty (auth off server-side).
-        EcfBaseUrl  = 'http://10.10.20.27:5173/api'
-        EcfApiKey   = ''
+        # EcfBaseUrl er en intern URL. EcfApiKey er en BLOED delt noegle (dette script er offentligt),
+        # der matcher AGENT_API_KEY paa ecFleet-serveren. Rigtig beskyttelse = netvaerks-isolation.
+        EcfBaseUrl  = 'http://10.234.8.107:5173/api'
+        EcfApiKey   = 'INjAxOrFYiaPlExpIniIysUZh36pLEP0'
         # GUID -> friendly name for Intune Win32 apps (the registry only exposes GUIDs). Keyed by the
         # base GUID (the IME app id without any "_1" revision suffix), lowercase.
         EcfAppNames = @{
