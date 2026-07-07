@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.5.1'
+$script:Version = '1.6.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -590,13 +590,15 @@ function Set-OnlineChip {
 # Run a scriptblock on a background runspace. $Work may call $Queue.Enqueue("...") for log lines
 # and should return a single value (its result). $OnComplete receives that result on the UI thread.
 function Start-BackgroundWork {
-    param([scriptblock]$Work, [scriptblock]$OnComplete)
+    param([scriptblock]$Work, [scriptblock]$OnComplete, [object]$Data)
 
     $rs = [runspacefactory]::CreateRunspace()
     $rs.ApartmentState = 'MTA'
     $rs.ThreadOptions  = 'ReuseThread'
     $rs.Open()
     $rs.SessionStateProxy.SetVariable('Queue', $script:LogQueue)
+    # Valgfri datapakke til Work-scriptblokken (fx tracked apps at detektere).
+    if ($PSBoundParameters.ContainsKey('Data')) { $rs.SessionStateProxy.SetVariable('Data', $Data) }
 
     $ps = [powershell]::Create()
     $ps.Runspace = $rs
@@ -666,6 +668,9 @@ $script:EcfEnabled = [bool]$script:EcfBaseUrl
 
 # Sand når app-navnene er hentet fra ecFleet (trackedApps) mindst én gang.
 $script:EcfAppNamesSynced = $false
+# Non-Win32 tracked apps (Store/M365/LOB) der detekteres lokalt pr. type:
+# array af @{ Gid; Name; Kind; Detect }. Win32 håndteres via IME-registret som før.
+$script:EcfExtraApps = @()
 
 # Hent app-navne (GUID -> navn) fra de trackedApps kunden har gemt i ecFleet
 # (Admin -> Applikationer) og overstyr den indbyggede liste, så board'et navngiver
@@ -680,6 +685,7 @@ function Sync-EcfAppNames {
         $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 4
         if ($resp -and $resp.apps) {
             $map = @{}
+            $extra = @()
             foreach ($a in $resp.apps) {
                 if (-not $a.id -or -not $a.name) { continue }
                 $gid = "$($a.id)".ToLower()
@@ -687,11 +693,18 @@ function Sync-EcfAppNames {
                     $gid = $matches[1].ToLower()
                 }
                 $map[$gid] = "$($a.name)"
+                # Kind mangler på ældre gemte apps -> antag win32 (bagudkompatibelt).
+                $kind = if ($a.PSObject.Properties['kind'] -and $a.kind) { "$($a.kind)".ToLower() } else { 'win32' }
+                if ($kind -ne 'win32') {
+                    $detect = if ($a.PSObject.Properties['detect']) { "$($a.detect)" } else { '' }
+                    $extra += @{ Gid = $gid; Name = "$($a.name)"; Kind = $kind; Detect = $detect }
+                }
             }
             if ($map.Count -gt 0) {
-                $script:EcfAppNames = $map
+                $script:EcfAppNames  = $map
+                $script:EcfExtraApps = $extra
                 $script:EcfAppNamesSynced = $true
-                Write-LogLine ("ecFleet: {0} app-navne hentet fra gemte trackedApps" -f $map.Count)
+                Write-LogLine ("ecFleet: {0} app-navne hentet ({1} ikke-Win32 til lokal detektion)" -f $map.Count, $extra.Count)
             } elseif ($resp.ok) {
                 # Serveren svarede, men kunden har ikke gemt nogen apps endnu.
                 $script:EcfAppNamesSynced = $true
@@ -795,6 +808,48 @@ function Notify-AppFailure {
     try { Invoke-GrsRefresh } catch { Write-LogLine "GRS-ryd efter app-fejl fejlede: $($_.Exception.Message)" 'ERROR' }
 }
 
+# Detektér install-status for IKKE-Win32 tracked apps (Store/M365/LOB) on-device,
+# pr. type. Kører i en baggrunds-runspace via Start-BackgroundWork -Data. Input
+# ($Data) = array af @{ Gid; Name; Kind; Detect }; output = @{ Gid; Name; Installed }.
+$script:ExtraAppWork = {
+    $out = @()
+    foreach ($app in @($Data)) {
+        $installed = $false
+        try {
+            switch ("$($app.Kind)".ToLower()) {
+                'msi' {
+                    # LOB MSI: installeret hvis ProductCode findes i Uninstall-registret.
+                    $pc = "$($app.Detect)".Trim()
+                    if ($pc) {
+                        foreach ($p in @(
+                            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$pc",
+                            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\$pc")) {
+                            if (Test-Path $p) { $installed = $true; break }
+                        }
+                    }
+                }
+                'm365' {
+                    # Microsoft 365 Apps: installeret hvis Click-to-Run har produkter registreret.
+                    $cfg = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+                    if ($cfg -and $cfg.ProductReleaseIds) { $installed = $true }
+                }
+                default {
+                    # store / appx: match på package family name / navn (best-effort).
+                    $d = "$($app.Detect)".Trim()
+                    if ($d) {
+                        $pkg = Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue |
+                            Where-Object { $_.PackageFamilyName -like "*$d*" -or $_.Name -like "*$d*" } |
+                            Select-Object -First 1
+                        if ($pkg) { $installed = $true }
+                    }
+                }
+            }
+        } catch {}
+        $out += [pscustomobject]@{ Gid = $app.Gid; Name = $app.Name; Installed = $installed }
+    }
+    return ,$out
+}
+
 # Gather named app + Windows Update status and report them as ecFleet badges. Each part runs on
 # its own background runspace via Start-BackgroundWork (same pattern as Update-AppStatus /
 # Update-WuStatus); the checks are built in the OnComplete callback (UI thread — safe) and each
@@ -862,6 +917,20 @@ function Report-EcfStatus {
             if ($installed) { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key)"; status = 'ok'; message = '' } }
         }
         if ($appxChecks.Count -gt 0) { Send-EcfReport $appxChecks }
+    }
+
+    # Ikke-Win32 tracked apps (Store/M365/LOB): detektér lokalt pr. type i baggrunden.
+    # Vises kun når de ER installeret (grønt navn) — samme princip som Win32.
+    if ($script:EcfExtraApps -and $script:EcfExtraApps.Count -gt 0) {
+        Start-BackgroundWork -Data $script:EcfExtraApps -Work $script:ExtraAppWork -OnComplete {
+            param($res)
+            if (-not $res) { return }
+            $checks = @()
+            foreach ($r in @($res)) {
+                if ($r.Installed) { $checks += @{ key = "app:$($r.Gid)"; label = "$($r.Name)"; status = 'ok'; message = '' } }
+            }
+            if ($checks.Count -gt 0) { Send-EcfReport $checks }
+        }
     }
 
     # Windows Update + reboot: read-only status snapshot ($script:WuWork). 'running' when a WU drive
