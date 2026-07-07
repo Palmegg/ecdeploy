@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.5.0'
+$script:Version = '1.5.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -736,8 +736,15 @@ function Send-EcfReport {
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
                 [void](Invoke-RestMethod -Method Post -Uri $Uri -Body $bytes -ContentType 'application/json; charset=utf-8' -Headers $Headers -TimeoutSec 5)
             } catch {
-                # A 404 (no active prep for this S/N) or any network error is harmless — best-effort log only.
-                try { $Queue.Enqueue('ecFleet: kunne ikke sende status') } catch {}
+                # Log ÅRSAGEN så man kan skelne: HTTP 404 (S/N matcher ingen aktiv klargøring
+                # / backend ikke opdateret), HTTP 401 (forkert API-nøgle), eller netværksfejl
+                # (kan ikke nå serveren — typisk IP/firewall). Best-effort.
+                $detail = $_.Exception.Message
+                try {
+                    $r = $_.Exception.Response
+                    if ($r -and $r.StatusCode) { $detail = "HTTP $([int]$r.StatusCode) $($r.StatusCode)" }
+                } catch {}
+                try { $Queue.Enqueue("ecFleet: kunne ikke sende status ($detail)") } catch {}
             }
         })
         $handle = $ps.BeginInvoke()
