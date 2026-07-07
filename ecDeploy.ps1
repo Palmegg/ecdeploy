@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.6.0'
+$script:Version = '1.7.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -185,6 +185,10 @@ $script:Customers = @{
         EcfAppxChecks = @{
             'Firmaportal' = 'Microsoft.CompanyPortal'
         }
+        # Apps hvis "Failed" IKKE er en rigtig fejl (by design). Match på navn (delstreng,
+        # ufølsom for store/små). Fx BitLocker-PIN: aktiveres først EFTER en genstart, så
+        # den må hverken vises rødt, udløse GRS-retry eller blokere den nødvendige genstart.
+        EcfFailureExempt = @('BitLocker')
     }
 }
 $script:Profile = $null
@@ -655,11 +659,13 @@ $script:EcfBaseUrl  = $null
 $script:EcfApiKey   = $null
 $script:EcfAppNames = @{}
 $script:EcfAppxChecks = @{}
+$script:EcfFailureExempt = @()
 if ($script:Profile) {
     if ($script:Profile.ContainsKey('EcfBaseUrl')) { $script:EcfBaseUrl = $script:Profile.EcfBaseUrl }
     if ($script:Profile.ContainsKey('EcfApiKey'))  { $script:EcfApiKey  = $script:Profile.EcfApiKey }
     if ($script:Profile.ContainsKey('EcfAppNames')) { $script:EcfAppNames = $script:Profile.EcfAppNames }
     if ($script:Profile.ContainsKey('EcfAppxChecks')) { $script:EcfAppxChecks = $script:Profile.EcfAppxChecks }
+    if ($script:Profile.ContainsKey('EcfFailureExempt')) { $script:EcfFailureExempt = @($script:Profile.EcfFailureExempt) }
 }
 
 # Central master switch: ecFleet is only ever active when a customer profile supplied a EcfBaseUrl
@@ -882,11 +888,25 @@ function Report-EcfStatus {
             $name = $script:EcfAppNames[$gid]
             # Apps der dækkes af et Appx-check rapporteres derfra (ikke via Intune-registret).
             if ($script:EcfAppxChecks.ContainsKey($name)) { continue }
+            # Nogle apps' "Failed" er by design (fx BitLocker-PIN, der først virker efter
+            # genstart). De må ikke vises rødt, ikke udløse GRS-retry og ikke blokere genstart.
+            $exempt = $false
+            foreach ($pat in $script:EcfFailureExempt) {
+                if ($pat -and "$name" -like "*$pat*") { $exempt = $true; break }
+            }
             # Vis KUN apps der ER installeret (grønt navn) eller er FEJLET (rødt navn).
             # Pending/ukendt skjules — board'et viser kun færdige resultater.
             switch ($a.Cat) {
                 'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'ok';   message = '' } }
-                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'fail'; message = "fejlkode $($a.Err)" }; $failedNames += $name }
+                'Failed'    {
+                    if ($exempt) {
+                        # By design: vis neutralt (gult) og tæl IKKE som fejl.
+                        $checks += @{ key = "app:$($a.Id)"; label = "$name (afventer genstart)"; status = 'warn'; message = 'Aktiveres efter genstart' }
+                    } else {
+                        $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'fail'; message = "fejlkode $($a.Err)" }
+                        $failedNames += $name
+                    }
+                }
                 default     { }   # Pending/ukendt: vis ikke
             }
         }
