@@ -206,6 +206,10 @@ $script:FlowName      = $Flow                 # customer flow to run on load (Ce
 $script:CedraRunning  = $false
 $script:CedraResuming = $false   # true while the post-login resume flow is active (ecFleet reporting)
 $script:WuDriveBusy   = $false
+# App-fejl: sæt når mindst én tracked app er FEJLET. Blokerer auto-genstart og
+# udløser (én gang pr. fejl-transition) en popup + GRS-ryd for retry.
+$script:AppFailed          = $false
+$script:AppFailureNotified = $false
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -728,6 +732,23 @@ function Set-EcfCheck {
     Send-EcfReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
 }
 
+# App-fejl-håndtering: vis en popup til teknikeren, ryd GRS så Intune forsøger
+# installationen igen, og spring auto-genstart over (håndteres i Start-RestartCountdown
+# via $script:AppFailed). Kaldes fra Report-EcfStatus ved en fejl-transition.
+function Notify-AppFailure {
+    param([string[]]$Names)
+    $list = (@($Names) | Select-Object -Unique) -join ', '
+    Write-LogLine "App(s) fejlede: $list — rydder GRS for retry, springer auto-genstart over" 'WARN'
+    try {
+        [System.Windows.MessageBox]::Show(
+            "Én eller flere apps fejlede under installationen:`n`n$list`n`nGRS-nøglerne ryddes nu, så Intune forsøger installationen igen.`nMaskinen bliver IKKE genstartet automatisk.",
+            'ecDeploy — app-installation fejlede',
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Warning) | Out-Null
+    } catch {}
+    try { Invoke-GrsRefresh } catch { Write-LogLine "GRS-ryd efter app-fejl fejlede: $($_.Exception.Message)" 'ERROR' }
+}
+
 # Gather named app + Windows Update status and report them as ecFleet badges. Each part runs on
 # its own background runspace via Start-BackgroundWork (same pattern as Update-AppStatus /
 # Update-WuStatus); the checks are built in the OnComplete callback (UI thread — safe) and each
@@ -742,6 +763,7 @@ function Report-EcfStatus {
         param($res)
         if (-not ($res -is [hashtable]) -or -not $res.Apps) { return }
         $checks = @()
+        $failedNames = @()
         foreach ($a in $res.Apps) {
             # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
             # revision suffix is ignored) and look it up; otherwise fall back to $a.Name (IME-log map / GUID).
@@ -755,14 +777,28 @@ function Report-EcfStatus {
             $name = $script:EcfAppNames[$gid]
             # Apps der dækkes af et Appx-check rapporteres derfra (ikke via Intune-registret).
             if ($script:EcfAppxChecks.ContainsKey($name)) { continue }
+            # Vis KUN apps der ER installeret (grønt navn) eller er FEJLET (rødt navn).
+            # Pending/ukendt skjules — board'et viser kun færdige resultater.
             switch ($a.Cat) {
-                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name OK";       status = 'ok';   message = '' } }
-                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name fejlet";   status = 'fail'; message = "fejlkode $($a.Err)" } }
-                'Pending'   { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }
-                default     { $checks += @{ key = "app:$($a.Id)"; label = "$name";          status = 'warn'; message = '' } }   # Unknown — orange, same as Pending
+                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'ok';   message = '' } }
+                'Failed'    { $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'fail'; message = "fejlkode $($a.Err)" }; $failedNames += $name }
+                default     { }   # Pending/ukendt: vis ikke
             }
         }
         if ($checks.Count -gt 0) { Send-EcfReport $checks }
+
+        # Fejl-håndtering: mindst én app fejlede -> popup + GRS-ryd (retry) + ingen
+        # auto-genstart. Udløses kun ved fejl-transition (ikke hvert 60-sek-tick).
+        if ($failedNames.Count -gt 0) {
+            $script:AppFailed = $true
+            if (-not $script:AppFailureNotified) {
+                $script:AppFailureNotified = $true
+                Notify-AppFailure $failedNames
+            }
+        } else {
+            $script:AppFailed = $false
+            $script:AppFailureNotified = $false
+        }
     }
 
     # Apps installed directly by CedraDeploy (e.g. Company Portal) — report from the actual appx
@@ -772,8 +808,8 @@ function Report-EcfStatus {
         foreach ($entry in $script:EcfAppxChecks.GetEnumerator()) {
             $installed = $false
             try { if (Get-AppxPackage -Name $entry.Value -ErrorAction SilentlyContinue) { $installed = $true } } catch {}
-            if ($installed) { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) OK"; status = 'ok'; message = '' } }
-            else            { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key) mangler"; status = 'warn'; message = '' } }
+            # Vis kun når den ER installeret (grønt navn); ellers ingen badge.
+            if ($installed) { $appxChecks += @{ key = "appx:$($entry.Value)"; label = "$($entry.Key)"; status = 'ok'; message = '' } }
         }
         if ($appxChecks.Count -gt 0) { Send-EcfReport $appxChecks }
     }
@@ -792,11 +828,7 @@ function Report-EcfStatus {
         } else {
             $checks += @{ key = 'windows_update'; label = 'Windows Update OK'; status = 'ok'; message = '' }
         }
-        if ($res.Reboot) {
-            $checks += @{ key = 'reboot'; label = 'Mangler genstart'; status = 'warn'; message = '' }
-        } else {
-            $checks += @{ key = 'reboot'; label = 'Genstart OK'; status = 'ok'; message = '' }
-        }
+        # (Reboot-badge fjernet — "Mangler genstart" er irrelevant på board'et.)
         Send-EcfReport $checks
     }
 }
@@ -1327,6 +1359,12 @@ function Invoke-DeviceRestart {
 
 function Start-RestartCountdown {
     param([int]$Seconds = 60)
+    # Spring auto-genstart over hvis en app er fejlet — GRS er ryddet for retry, og
+    # maskinen skal blive kørende så installationen kan lykkes uden reboot-loop.
+    if ($script:AppFailed) {
+        Write-LogLine 'Auto-genstart sprunget over: en app er fejlet (GRS ryddet for retry)' 'WARN'
+        return
+    }
     Set-EcfCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:RestartXaml)
     $w = [Windows.Markup.XamlReader]::Load($reader)
