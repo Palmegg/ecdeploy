@@ -664,6 +664,45 @@ if ($script:Profile) {
 # (i.e. CedraDanmark). Generic ecDeploy leaves this $false and every ecFleet function no-ops.
 $script:EcfEnabled = [bool]$script:EcfBaseUrl
 
+# Sand når app-navnene er hentet fra ecFleet (trackedApps) mindst én gang.
+$script:EcfAppNamesSynced = $false
+
+# Hent app-navne (GUID -> navn) fra de trackedApps kunden har gemt i ecFleet
+# (Admin -> Applikationer) og overstyr den indbyggede liste, så board'et navngiver
+# præcis de apps kunden har valgt. Best-effort: beholder den indbyggede liste hvis
+# kaldet fejler eller intet er gemt. Resolves server-side ud fra maskinens serial.
+function Sync-EcfAppNames {
+    if (-not $script:EcfEnabled -or -not $script:DeviceSerial) { return }
+    try {
+        $uri = "$script:EcfBaseUrl/agent/tracked-apps?serial=$([uri]::EscapeDataString($script:DeviceSerial))"
+        $headers = @{}
+        if ($script:EcfApiKey) { $headers['X-Api-Key'] = $script:EcfApiKey }
+        $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 4
+        if ($resp -and $resp.apps) {
+            $map = @{}
+            foreach ($a in $resp.apps) {
+                if (-not $a.id -or -not $a.name) { continue }
+                $gid = "$($a.id)".ToLower()
+                if ("$($a.id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                    $gid = $matches[1].ToLower()
+                }
+                $map[$gid] = "$($a.name)"
+            }
+            if ($map.Count -gt 0) {
+                $script:EcfAppNames = $map
+                $script:EcfAppNamesSynced = $true
+                Write-LogLine ("ecFleet: {0} app-navne hentet fra gemte trackedApps" -f $map.Count)
+            } elseif ($resp.ok) {
+                # Serveren svarede, men kunden har ikke gemt nogen apps endnu.
+                $script:EcfAppNamesSynced = $true
+            }
+        }
+    } catch {
+        Write-LogLine 'ecFleet: kunne ikke hente app-navne fra server (bruger indbygget liste)' 'WARN'
+    }
+}
+if ($script:EcfEnabled) { Sync-EcfAppNames }
+
 # POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
 function Send-EcfReport {
     param([object[]]$Checks)
@@ -756,6 +795,10 @@ function Notify-AppFailure {
 function Report-EcfStatus {
     if (-not $script:EcfEnabled) { return }
     if (-not $script:DeviceSerial) { return }
+
+    # Hent app-navne fra ecFleet hvis det ikke lykkedes ved opstart (fx fordi S/N
+    # endnu ikke var registreret). Prøver igen hvert tick indtil det lykkes én gang.
+    if (-not $script:EcfAppNamesSynced) { Sync-EcfAppNames }
 
     # Apps: one badge per PRE-DEFINED Intune Win32 app (EcfAppNames), by friendly name.
     # Undefined apps (and the GRS key) are skipped entirely.
