@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.7.0'
+$script:Version = '1.7.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -166,7 +166,7 @@ $script:Customers = @{
         # safeguard is that /agent/report is internal-only and you must hit a valid in-progress S/N.
         # EcfBaseUrl er en intern URL. EcfApiKey er en BLOED delt noegle (dette script er offentligt),
         # der matcher AGENT_API_KEY paa ecFleet-serveren. Rigtig beskyttelse = netvaerks-isolation.
-        EcfBaseUrl  = 'http://10.234.8.107:5173/api'
+        EcfBaseUrl  = 'http://10.234.8.109:5173/api'
         EcfApiKey   = 'INjAxOrFYiaPlExpIniIysUZh36pLEP0'
         # GUID -> friendly name for Intune Win32 apps (the registry only exposes GUIDs). Keyed by the
         # base GUID (the IME app id without any "_1" revision suffix), lowercase.
