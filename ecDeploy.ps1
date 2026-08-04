@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.7.2'
+$script:Version = '1.7.3'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1640,11 +1640,11 @@ function Start-IntuneSync {
     }
 }
 
-# CedraStandard: anti-sleep + Windows Update now, GRS after 45 min, restart after 120 min,
+# CedraStandard: anti-sleep + Windows Update now, GRS after 60 min, restart after 120 min,
 # and a one-shot resume task so the next logon resumes (anti-sleep only + Windows Update).
 function Start-CedraFlow {
     if (-not $script:IsAdmin) { $script:UI.TxtAutoStatus.Text = 'Kræver administrator.'; Write-LogLine 'CedraDeploy kræver administrator' 'WARN'; return }
-    $grsMin = 45; $restartMin = 120
+    $grsMin = 60; $restartMin = 120
     if ($env:CEDRA_GRS_MIN) { [void][int]::TryParse($env:CEDRA_GRS_MIN, [ref]$grsMin) }
     if ($env:CEDRA_RESTART_MIN) { [void][int]::TryParse($env:CEDRA_RESTART_MIN, [ref]$restartMin) }
 
