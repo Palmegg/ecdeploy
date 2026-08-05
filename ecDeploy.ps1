@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.7.4'
+$script:Version = '1.8.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1900,10 +1900,30 @@ $script:Window.Add_Closing({
 })
 #endregion
 
+# Kør-én-gang ved FØRSTE åbning af Cedra Deploy på maskinen: nulstil Windows Hello
+# for Business-containeren (certutil -deleteHelloContainer). En marker-fil i
+# ProgramData sikrer at det aldrig gentages. Kun i Cedra-flow.
+function Invoke-FirstRunHelloReset {
+    if ($Customer -ne 'CedraDanmark') { return }
+    $marker = Join-Path $script:LogDir 'hello-container-reset.done'
+    if (Test-Path -LiteralPath $marker) { return }   # allerede kørt på denne maskine
+    Write-LogLine 'Første kørsel: nulstiller Hello for Business-container (certutil -deleteHelloContainer)'
+    try {
+        $out = & certutil.exe -deleteHelloContainer 2>&1
+        $lvl = if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' }
+        Write-LogLine ("certutil -deleteHelloContainer: exit {0}" -f $LASTEXITCODE) $lvl
+    } catch {
+        Write-LogLine "certutil -deleteHelloContainer fejlede: $($_.Exception.Message)" 'WARN'
+    }
+    # Markér som kørt uanset udfald, så det kun sker ved første åbning.
+    try { Set-Content -LiteralPath $marker -Value ((Get-Date).ToString('s')) -Encoding UTF8 } catch {}
+}
+
 #region ---------------------------------------------------------- startup
 Update-Chips
 Set-OnlineChip 'checking'
 Write-LogLine "ecDeploy v$script:Version startet"
+Invoke-FirstRunHelloReset
 if ($script:IsAdmin) { Write-LogLine 'Kører som administrator' }
 else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger er deaktiveret' 'WARN' }
 Update-SequenceControls
