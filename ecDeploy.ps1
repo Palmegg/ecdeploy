@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.8.1'
+$script:Version = '1.8.2'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1908,12 +1908,39 @@ function Invoke-FirstRunHelloReset {
     $marker = Join-Path $script:LogDir 'hello-container-reset.done'
     if (Test-Path -LiteralPath $marker) { return }   # allerede kørt på denne maskine
     Write-LogLine 'Første kørsel: fjerner Hello for Business-container (certutil -deleteHelloContainer)...'
+    # VIGTIGT: certutil -deleteHelloContainer virker på den bruger kommandoen kører
+    # som. ecDeploy er elevered (admin), og den eleverede session har INGEN Hello-
+    # container (-> 0x80090011 NTE_NOT_FOUND). Containeren ligger i den INDLOGGEDE
+    # brugers ikke-eleverede session, så vi kører certutil dér via en engangs-opgave.
     try {
-        $out = & certutil.exe -deleteHelloContainer 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-LogLine 'Hello for Business-container fjernet.'
+        $who = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
+        if ($who) {
+            $taskName  = 'ecDeploy-DeleteHelloContainer'
+            $action    = New-ScheduledTaskAction -Execute 'certutil.exe' -Argument '-deleteHelloContainer'
+            $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
+            Start-ScheduledTask -TaskName $taskName
+            # Vent på at opgaven er kørt færdig (certutil er hurtig; max ~10 sek).
+            # 267011 (0x41303) = "har ikke kørt endnu" — vent til den faktisk har kørt.
+            $rc = $null
+            for ($i = 0; $i -lt 20; $i++) {
+                Start-Sleep -Milliseconds 500
+                $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+                if ($info -and $info.State -ne 'Running' -and $info.LastTaskResult -ne 267011) {
+                    $rc = $info.LastTaskResult; break
+                }
+            }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+            if ($rc -eq 0) {
+                Write-LogLine ("Hello for Business-container fjernet (som {0})." -f $who)
+            } else {
+                Write-LogLine ("Hello for Business-container: exit {0} (som {1}) — muligvis ingen container." -f $rc, $who) 'WARN'
+            }
         } else {
-            Write-LogLine ("Hello for Business-container: certutil returnerede {0} (muligvis ingen container at fjerne)." -f $LASTEXITCODE) 'WARN'
+            # Ingen indlogget bruger fundet — fallback: kør direkte.
+            $out = & certutil.exe -deleteHelloContainer 2>&1
+            if ($LASTEXITCODE -eq 0) { Write-LogLine 'Hello for Business-container fjernet.' }
+            else { Write-LogLine ("Hello for Business-container: certutil returnerede {0}." -f $LASTEXITCODE) 'WARN' }
         }
     } catch {
         Write-LogLine "Kunne ikke fjerne Hello for Business-container: $($_.Exception.Message)" 'WARN'
