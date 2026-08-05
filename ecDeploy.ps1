@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.8.0'
+$script:Version = '1.8.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1907,13 +1907,16 @@ function Invoke-FirstRunHelloReset {
     if ($Customer -ne 'CedraDanmark') { return }
     $marker = Join-Path $script:LogDir 'hello-container-reset.done'
     if (Test-Path -LiteralPath $marker) { return }   # allerede kørt på denne maskine
-    Write-LogLine 'Første kørsel: nulstiller Hello for Business-container (certutil -deleteHelloContainer)'
+    Write-LogLine 'Første kørsel: fjerner Hello for Business-container (certutil -deleteHelloContainer)...'
     try {
         $out = & certutil.exe -deleteHelloContainer 2>&1
-        $lvl = if ($LASTEXITCODE -eq 0) { 'INFO' } else { 'WARN' }
-        Write-LogLine ("certutil -deleteHelloContainer: exit {0}" -f $LASTEXITCODE) $lvl
+        if ($LASTEXITCODE -eq 0) {
+            Write-LogLine 'Hello for Business-container fjernet.'
+        } else {
+            Write-LogLine ("Hello for Business-container: certutil returnerede {0} (muligvis ingen container at fjerne)." -f $LASTEXITCODE) 'WARN'
+        }
     } catch {
-        Write-LogLine "certutil -deleteHelloContainer fejlede: $($_.Exception.Message)" 'WARN'
+        Write-LogLine "Kunne ikke fjerne Hello for Business-container: $($_.Exception.Message)" 'WARN'
     }
     # Markér som kørt uanset udfald, så det kun sker ved første åbning.
     try { Set-Content -LiteralPath $marker -Value ((Get-Date).ToString('s')) -Encoding UTF8 } catch {}
