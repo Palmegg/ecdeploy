@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.8.2'
+$script:Version = '1.8.3'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1916,19 +1916,23 @@ function Invoke-FirstRunHelloReset {
         $who = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
         if ($who) {
             $taskName  = 'ecDeploy-DeleteHelloContainer'
-            $action    = New-ScheduledTaskAction -Execute 'certutil.exe' -Argument '-deleteHelloContainer'
+            # Kør via skjult PowerShell så certutil ikke flakker et CMD-vindue op i
+            # brugerens session. Exit-koden fra certutil videreføres som opgavens resultat.
+            $psArg = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& certutil.exe -deleteHelloContainer | Out-Null; exit $LASTEXITCODE"'
+            $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $psArg
             $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
             Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
             Start-ScheduledTask -TaskName $taskName
             # Vent på at opgaven er kørt færdig (certutil er hurtig; max ~10 sek).
-            # 267011 (0x41303) = "har ikke kørt endnu" — vent til den faktisk har kørt.
+            # Vent til opgaven har et RIGTIGT resultat. Skiptilstande (ikke færdig):
+            #   State=Running, 267009 (0x41301) = kører stadig, 267011 (0x41303) = ikke kørt endnu.
             $rc = $null
-            for ($i = 0; $i -lt 20; $i++) {
+            for ($i = 0; $i -lt 40; $i++) {
                 Start-Sleep -Milliseconds 500
                 $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-                if ($info -and $info.State -ne 'Running' -and $info.LastTaskResult -ne 267011) {
-                    $rc = $info.LastTaskResult; break
-                }
+                if (-not $info) { continue }
+                $running = ($info.State -eq 'Running') -or ($info.LastTaskResult -in 267009, 267011)
+                if (-not $running) { $rc = $info.LastTaskResult; break }
             }
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             if ($rc -eq 0) {
