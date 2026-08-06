@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.9.0'
+$script:Version = '1.10.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -736,12 +736,14 @@ if ($script:EcfEnabled) { Sync-EcfAppNames }
 
 # POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
 function Send-EcfReport {
-    param([object[]]$Checks)
+    param([object[]]$Checks, [switch]$Done)
     if (-not $script:EcfEnabled) { return }
     if (-not $script:EcfBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
-        $body = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks } | ConvertTo-Json -Depth 6
+        $payload = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks }
+        if ($Done) { $payload.done = $true }   # markér klargøring FÆRDIG på boardet
+        $body = $payload | ConvertTo-Json -Depth 6
         $uri  = "$script:EcfBaseUrl/agent/report"
         $headers = @{}
         if ($script:EcfApiKey) { $headers['X-Api-Key'] = $script:EcfApiKey }
@@ -807,6 +809,15 @@ function Set-EcfCheck {
     param([string]$Key, [string]$Label, [string]$Status, [string]$Message)
     if (-not $script:EcfEnabled) { return }
     Send-EcfReport @(@{ key = $Key; label = $Label; status = $Status; message = $Message })
+}
+
+# Meld klargøringen FÆRDIG (success) til ecFleet-boardet. Sendes lige før den
+# planlagte genstart når alt gik rent, så pladsen viser "Klargøring færdig" i
+# stedet for at gå stale ("Mistet forbindelse") når agenten tavner efter reboot.
+function Set-EcfDone {
+    if (-not $script:EcfEnabled) { return }
+    Write-LogLine 'ecFleet: melder klargøring FÆRDIG (success)'
+    Send-EcfReport -Done @(@{ key = 'provisioning'; label = 'Klargøring færdig'; status = 'ok'; message = 'Klargjort og genstartet' })
 }
 
 # App-fejl-håndtering: vis en popup til teknikeren, ryd GRS så Intune forsøger
@@ -1697,12 +1708,22 @@ function Start-CedraFlow {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
+                if ($script:AppFailed) {
+                    # En app fejlede: spring Hello-reset + success-melding OVER — maskinen
+                    # er ikke færdig. Start-RestartCountdown springer selv genstarten over.
+                    Start-RestartCountdown 60
+                    return
+                }
                 # Slet teknikerens Hello-PIN som SIDSTE handling før genstart, så slutbrugeren
                 # bliver bedt om at oprette sin egen PIN. Ved fejl vises en rød fejl-popup.
+                $helloOk = $true
                 if ($Customer -eq 'CedraDanmark') {
                     Write-LogLine 'Fjerner Hello-PIN før genstart...'
-                    Invoke-HelloRemoval | Out-Null
+                    $helloOk = Invoke-HelloRemoval
                 }
+                # Meld SUCCESS til boardet FØR genstart — kun hvis alt gik rent — så pladsen
+                # viser "Klargøring færdig" i stedet for "Mistet forbindelse" efter reboot.
+                if ($helloOk) { Set-EcfDone }
                 # No resume task: the user must re-authenticate (admin/TAP) at next logon anyway,
                 # so CedraDeploy is NOT auto-started after the restart.
                 Start-RestartCountdown 60
