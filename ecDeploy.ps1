@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.8.3'
+$script:Version = '1.9.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -352,6 +352,7 @@ $xaml = @'
                             <Button x:Name="NavNoSleep" Style="{StaticResource NavButton}" Content="No Sleep"/>
                             <Button x:Name="NavGrs"     Style="{StaticResource NavButton}" Content="Opdater GRS"/>
                             <Button x:Name="NavIme"     Style="{StaticResource NavButton}" Content="Genstart IME"/>
+                            <Button x:Name="NavHello"   Style="{StaticResource NavButton}" Content="Fjern Hello-PIN"/>
                             <Border Height="1" Background="{StaticResource Border}" Margin="14,12"/>
                             <TextBlock Text="DIAGNOSTIK" Foreground="{StaticResource Muted}" FontSize="10" Margin="22,0,0,4"/>
                             <Button x:Name="NavWu"      Style="{StaticResource NavButton}" Content="Windows Update"/>
@@ -428,6 +429,16 @@ $xaml = @'
                                    Text="Bemærk: undgå at genstarte midt i en igangværende installation."/>
                         <TextBlock x:Name="TxtImeStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
                         <Button x:Name="BtnRunIme" Style="{StaticResource PrimaryButton}" Content="Genstart IME nu" HorizontalAlignment="Left"/>
+                    </StackPanel>
+
+                    <!-- Fjern Hello-PIN (klargør til forsendelse) -->
+                    <StackPanel x:Name="PanelHello" Visibility="Collapsed">
+                        <TextBlock Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,12"
+                                   Text="Sletter teknikerens Windows Hello for Business-PIN (certutil -deleteHelloContainer) for den indloggede bruger, så slutbrugeren bliver bedt om at oprette sin egen PIN ved første login."/>
+                        <TextBlock Foreground="#F4B36A" TextWrapping="Wrap" Margin="0,0,0,14"
+                                   Text="Kør dette som ALLERSIDSTE skridt før maskinen slukkes og pakkes. Log ikke ind igen bagefter — så genskabes PIN'en. (Den køres også automatisk lige før den planlagte genstart.)"/>
+                        <TextBlock x:Name="TxtHelloStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,14"/>
+                        <Button x:Name="BtnRunHello" Style="{StaticResource PrimaryButton}" Content="Fjern Hello-PIN nu" HorizontalAlignment="Left"/>
                     </StackPanel>
 
                     <!-- Windows Update status -->
@@ -515,6 +526,7 @@ foreach ($name in @(
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
     'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme',
+    'NavHello','PanelHello','TxtHelloStatus','BtnRunHello',
     'NavApps','PanelApps','BtnAppsRefresh','TxtAppsSummary','AppsList',
     'NavImeLog','PanelImeLog','ChkImeErrorsOnly','BtnImeLogRefresh','TxtImeLogStatus','ImeLogBox',
     'NavInfo','PanelInfo','InfoBox','BtnInfoRefresh','BtnDiag','TxtInfoStatus',
@@ -1685,6 +1697,12 @@ function Start-CedraFlow {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
+                # Slet teknikerens Hello-PIN som SIDSTE handling før genstart, så slutbrugeren
+                # bliver bedt om at oprette sin egen PIN. Ved fejl vises en rød fejl-popup.
+                if ($Customer -eq 'CedraDanmark') {
+                    Write-LogLine 'Fjerner Hello-PIN før genstart...'
+                    Invoke-HelloRemoval | Out-Null
+                }
                 # No resume task: the user must re-authenticate (admin/TAP) at next logon anyway,
                 # so CedraDeploy is NOT auto-started after the restart.
                 Start-RestartCountdown 60
@@ -1805,7 +1823,7 @@ function Stop-AutoSequence {
 #region ---------------------------------------------------------- navigation + tools
 function Show-Panel {
     param([string]$Name, [string]$Title)
-    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs','PanelIme','PanelWu','PanelApps','PanelImeLog','PanelInfo') {
+    foreach ($p in 'PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs','PanelIme','PanelHello','PanelWu','PanelApps','PanelImeLog','PanelInfo') {
         $script:UI[$p].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' }
     }
     $script:UI.TxtPanelTitle.Text = $Title
@@ -1835,6 +1853,7 @@ $script:UI.NavAuto.Add_Click(    { Show-Panel 'PanelAuto'    'Automatisk sekvens
 $script:UI.NavNoSleep.Add_Click( { Show-Panel 'PanelNoSleep' 'No Sleep' })
 $script:UI.NavGrs.Add_Click(     { Show-Panel 'PanelGrs'     'Opdater GRS' })
 $script:UI.NavIme.Add_Click(     { Show-Panel 'PanelIme'     'Genstart IME' })
+$script:UI.NavHello.Add_Click(   { Show-Panel 'PanelHello'   'Fjern Hello-PIN' })
 $script:UI.NavWu.Add_Click(      { Show-Panel 'PanelWu'      'Windows Update' })
 $script:UI.NavApps.Add_Click(    { Show-Panel 'PanelApps'    'App-status' })
 $script:UI.NavImeLog.Add_Click(  { Show-Panel 'PanelImeLog'  'Live IME-log' })
@@ -1863,6 +1882,23 @@ $script:UI.BtnRunIme.Add_Click({
         'Dette genstarter IME-tjenesten. Undgå at køre det midt i en installation. Fortsæt?',
         'Genstart IME', 'YesNo', 'Warning')
     if ($answer -eq 'Yes') { Invoke-ImeRestart }
+})
+
+$script:UI.BtnRunHello.Add_Click({
+    $answer = [System.Windows.MessageBox]::Show(
+        ("Dette sletter den indloggede brugers Windows Hello-PIN.`n`n" +
+         "Kør det som ALLERSIDSTE skridt før maskinen slukkes og pakkes — " +
+         "logger du ind igen bagefter, genskabes PIN'en. Fortsæt?"),
+        'Fjern Hello-PIN', 'YesNo', 'Warning')
+    if ($answer -ne 'Yes') { return }
+    $script:UI.BtnRunHello.IsEnabled = $false
+    $script:UI.TxtHelloStatus.Text = 'Fjerner Hello-PIN...'
+    if (Invoke-HelloRemoval) {
+        $script:UI.TxtHelloStatus.Text = 'Hello-PIN fjernet. Sluk maskinen nu uden at logge ind igen.'
+    } else {
+        $script:UI.TxtHelloStatus.Text = 'FEJL — Hello-PIN blev IKKE fjernet. Slet den manuelt før forsendelse.'
+    }
+    $script:UI.BtnRunHello.IsEnabled = $true
 })
 
 $script:UI.BtnImeLogs.Add_Click({ Open-FolderSafe $script:ImeLogsPath 'IME-logs' })
@@ -1900,30 +1936,25 @@ $script:Window.Add_Closing({
 })
 #endregion
 
-# Kør-én-gang ved FØRSTE åbning af Cedra Deploy på maskinen: nulstil Windows Hello
-# for Business-containeren (certutil -deleteHelloContainer). En marker-fil i
-# ProgramData sikrer at det aldrig gentages. Kun i Cedra-flow.
-function Invoke-FirstRunHelloReset {
-    if ($Customer -ne 'CedraDanmark') { return }
-    $marker = Join-Path $script:LogDir 'hello-container-reset.done'
-    if (Test-Path -LiteralPath $marker) { return }   # allerede kørt på denne maskine
-    Write-LogLine 'Første kørsel: fjerner Hello for Business-container (certutil -deleteHelloContainer)...'
-    # VIGTIGT: certutil -deleteHelloContainer virker på den bruger kommandoen kører
-    # som. ecDeploy er elevered (admin), og den eleverede session har INGEN Hello-
-    # container (-> 0x80090011 NTE_NOT_FOUND). Containeren ligger i den INDLOGGEDE
-    # brugers ikke-eleverede session, så vi kører certutil dér via en engangs-opgave.
+# Slet den INDLOGGEDE brugers Windows Hello for Business-container
+# (certutil -deleteHelloContainer). Returnerer $true ved succes (exit 0), ellers $false.
+# VIGTIGT: certutil -deleteHelloContainer virker på den bruger kommandoen kører som.
+# ecDeploy er elevered (admin), og den eleverede session har INGEN Hello-container
+# (-> 0x80090011 NTE_NOT_FOUND). Containeren ligger i den INDLOGGEDE brugers
+# ikke-eleverede session, så vi kører certutil dér via en engangs-opgave (skjult vindue).
+# Kaldes både af "Fjern Hello-PIN"-knappen og automatisk lige før den planlagte genstart.
+function Remove-HelloContainer {
+    $script:HelloLastError = $null
+    Write-LogLine 'Fjerner Hello for Business-container (certutil -deleteHelloContainer)...'
     try {
         $who = (Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue).UserName
         if ($who) {
             $taskName  = 'ecDeploy-DeleteHelloContainer'
-            # Kør via skjult PowerShell så certutil ikke flakker et CMD-vindue op i
-            # brugerens session. Exit-koden fra certutil videreføres som opgavens resultat.
             $psArg = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "& certutil.exe -deleteHelloContainer | Out-Null; exit $LASTEXITCODE"'
             $action    = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $psArg
             $principal = New-ScheduledTaskPrincipal -UserId $who -LogonType Interactive -RunLevel Limited
             Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Force | Out-Null
             Start-ScheduledTask -TaskName $taskName
-            # Vent på at opgaven er kørt færdig (certutil er hurtig; max ~10 sek).
             # Vent til opgaven har et RIGTIGT resultat. Skiptilstande (ikke færdig):
             #   State=Running, 267009 (0x41301) = kører stadig, 267011 (0x41303) = ikke kørt endnu.
             $rc = $null
@@ -1937,27 +1968,70 @@ function Invoke-FirstRunHelloReset {
             Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             if ($rc -eq 0) {
                 Write-LogLine ("Hello for Business-container fjernet (som {0})." -f $who)
-            } else {
-                Write-LogLine ("Hello for Business-container: exit {0} (som {1}) — muligvis ingen container." -f $rc, $who) 'WARN'
+                return $true
             }
-        } else {
-            # Ingen indlogget bruger fundet — fallback: kør direkte.
-            $out = & certutil.exe -deleteHelloContainer 2>&1
-            if ($LASTEXITCODE -eq 0) { Write-LogLine 'Hello for Business-container fjernet.' }
-            else { Write-LogLine ("Hello for Business-container: certutil returnerede {0}." -f $LASTEXITCODE) 'WARN' }
+            Write-LogLine ("Hello for Business-container: exit {0} (som {1})." -f $rc, $who) 'ERROR'
+            $script:HelloLastError = ("certutil afsluttede med exit-kode {0} (som bruger {1})." -f $rc, $who)
+            return $false
         }
+        # Ingen indlogget bruger fundet — fallback: kør direkte.
+        $out = & certutil.exe -deleteHelloContainer 2>&1
+        if ($LASTEXITCODE -eq 0) { Write-LogLine 'Hello for Business-container fjernet.'; return $true }
+        Write-LogLine ("Hello for Business-container: certutil returnerede {0}." -f $LASTEXITCODE) 'ERROR'
+        $script:HelloLastError = ("certutil afsluttede med exit-kode {0} (ingen indlogget bruger fundet)." -f $LASTEXITCODE)
+        return $false
     } catch {
-        Write-LogLine "Kunne ikke fjerne Hello for Business-container: $($_.Exception.Message)" 'WARN'
+        Write-LogLine "Kunne ikke fjerne Hello for Business-container: $($_.Exception.Message)" 'ERROR'
+        $script:HelloLastError = $_.Exception.Message
+        return $false
     }
-    # Markér som kørt uanset udfald, så det kun sker ved første åbning.
-    try { Set-Content -LiteralPath $marker -Value ((Get-Date).ToString('s')) -Encoding UTF8 } catch {}
+}
+
+# Stor rød fejl-popup når Hello-containeren IKKE kunne slettes.
+$script:HelloErrorXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FEJL — Hello-PIN" Height="330" Width="640"
+        WindowStartupLocation="CenterScreen" Background="#C1121F"
+        FontFamily="Segoe UI" ResizeMode="NoResize" Topmost="True" WindowStyle="SingleBorderWindow">
+  <StackPanel Margin="34" VerticalAlignment="Center">
+    <TextBlock Text="&#9888; FEJL: Hello-PIN blev IKKE slettet" Foreground="White"
+               FontSize="27" FontWeight="Bold" TextWrapping="Wrap"/>
+    <TextBlock x:Name="TxtDetail" Foreground="#FFE3E3" FontSize="15" TextWrapping="Wrap" Margin="0,16,0,0"/>
+    <TextBlock Text="Slet teknikerens Hello-PIN MANUELT før maskinen sendes til brugeren (kør 'certutil -deleteHelloContainer' som den indloggede bruger), eller prøv 'Fjern Hello-PIN'-knappen igen."
+               Foreground="White" FontSize="14" TextWrapping="Wrap" Margin="0,16,0,0"/>
+    <Button x:Name="BtnOk" Content="OK" Padding="28,9" Margin="0,22,0,0" HorizontalAlignment="Right"
+            Background="White" Foreground="#C1121F" FontWeight="Bold" FontSize="15" BorderThickness="0" Cursor="Hand"/>
+  </StackPanel>
+</Window>
+'@
+
+function Show-HelloError {
+    param([string]$Detail)
+    try {
+        $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:HelloErrorXaml)
+        $script:HelloErrWin = [Windows.Markup.XamlReader]::Load($reader)
+        try { $script:HelloErrWin.Owner = $script:Window } catch {}
+        $script:HelloErrWin.FindName('TxtDetail').Text = $Detail
+        $script:HelloErrWin.FindName('BtnOk').Add_Click({ $script:HelloErrWin.Close() })
+        [void]$script:HelloErrWin.ShowDialog()
+    } catch {
+        # Fallback hvis WPF-vinduet fejler.
+        [System.Windows.MessageBox]::Show("FEJL: Hello-PIN blev IKKE slettet.`n`n$Detail", 'FEJL', 'OK', 'Error') | Out-Null
+    }
+}
+
+# Kør slettelsen og vis den røde fejl-popup hvis den fejler. Returnerer $true ved succes.
+function Invoke-HelloRemoval {
+    if (Remove-HelloContainer) { return $true }
+    Show-HelloError ($(if ($script:HelloLastError) { $script:HelloLastError } else { 'Ukendt fejl.' }))
+    return $false
 }
 
 #region ---------------------------------------------------------- startup
 Update-Chips
 Set-OnlineChip 'checking'
 Write-LogLine "ecDeploy v$script:Version startet"
-Invoke-FirstRunHelloReset
 if ($script:IsAdmin) { Write-LogLine 'Kører som administrator' }
 else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger er deaktiveret' 'WARN' }
 Update-SequenceControls
