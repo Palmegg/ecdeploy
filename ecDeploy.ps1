@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.10.0'
+$script:Version = '1.11.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -743,6 +743,11 @@ function Send-EcfReport {
     try {
         $payload = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks }
         if ($Done) { $payload.done = $true }   # markér klargøring FÆRDIG på boardet
+        # Rapportér det planlagte genstarts-tidspunkt mens Cedra-flowet kører, så
+        # boardet kan vise en live countdown. ISO 8601 round-trip ('o').
+        if ($script:CedraRunning -and $script:CedraRestartAt) {
+            $payload.restartAt = $script:CedraRestartAt.ToString('o')
+        }
         $body = $payload | ConvertTo-Json -Depth 6
         $uri  = "$script:EcfBaseUrl/agent/report"
         $headers = @{}
