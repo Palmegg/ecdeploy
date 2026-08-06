@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.12.0'
+$script:Version = '1.13.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -159,6 +159,9 @@ $script:Customers = @{
         Brand       = 'CedraDeploy'
         Wordmark    = 'CedraDanmark'
         DevelopedBy = 'Developed by Jonas Palme'
+        # Launcher-URL til "Hent nyeste version"-knappen: irm <LaunchUrl> | iex henter
+        # og starter den nyeste CedraDeploy (samme bootstrap som ved resume).
+        LaunchUrl   = 'cdr.palme3.dk'
         Accent      = '#14B8A6'
         AccentHover = '#0D9488'
         LogoB64     = $script:CedraLogoB64
@@ -210,13 +213,18 @@ $script:FlowName      = $Flow                 # customer flow to run on load (Ce
 $script:CedraRunning  = $false
 $script:CedraResuming = $false   # true while the post-login resume flow is active (ecFleet reporting)
 $script:WuDriveBusy   = $false
-# App-fejl: $AppFailed er den LIVE status (opdateres hvert 60-sek-tick af
-# Report-EcfStatus). Beslutningen om IKKE at genstarte + fejl-beskeden tages FØRST
-# ved 2-timers-mærket (Start-CedraFlow), hvor $AppFailed/$LastFailedNames aflæses.
-# $AppFailureNotified gater den (tavse) GRS-retry til én gang pr. fejl-transition.
-$script:AppFailed          = $false
-$script:AppFailureNotified = $false
-$script:LastFailedNames    = @()
+# HYPERCARE — automatisk per-app geninstallation af fejlede Intune-apps.
+# $HyperCare: guid(lower) -> @{ Name; Attempts; LastAttempt(DateTime|null); State }
+#   State: 'retrying' (forsøger stadig) | 'ok' (kom sig) | 'failed' (opbrugte forsøg).
+# Retry = slet KUN den fejlede apps enforcement-nøgle + genstart IME (per-app, rører
+# ikke de andre apps). Kører både under og EFTER de 2 timer, op til $HyperMaxAttempts
+# forsøg med $HyperIntervalSec imellem (IME skal nå at forsøge installationen).
+$script:HyperMaxAttempts = 4
+$script:HyperIntervalSec = 480          # 8 min mellem forsøg
+$script:HyperCare        = @{}
+$script:HyperActive      = $false       # true når post-2t hypercare-board-tilstanden kører
+$script:CedraTerminal    = $false       # true når klargøringen er endeligt afsluttet (done/failed)
+$script:SelfUpdating     = $false       # true mens "Hent nyeste version" lukker for at relaunche
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -367,6 +375,7 @@ $xaml = @'
                             <Button x:Name="BtnImeLogs"  Style="{StaticResource NavButton}" Content="IME-logs"/>
                             <Button x:Name="BtnPrograms" Style="{StaticResource NavButton}" Content="Programmer"/>
                             <Button x:Name="BtnTaskMgr"  Style="{StaticResource NavButton}" Content="Jobliste"/>
+                            <Button x:Name="BtnUpdate"   Style="{StaticResource NavButton}" Content="Hent nyeste version"/>
                         </StackPanel>
                     </ScrollViewer>
                 </DockPanel>
@@ -524,7 +533,7 @@ $script:Window = [Windows.Markup.XamlReader]::Load($reader)
 
 foreach ($name in @(
     'LogoImg','TxtWordmark','TxtDevelopedBy','TxtAdmin','ChipAdmin','TxtOnline','ChipOnline','TxtNoSleep','ChipNoSleep','TxtVersion','BannerNoSleep',
-    'NavAuto','NavNoSleep','NavGrs','BtnImeLogs','BtnPrograms','BtnTaskMgr','BtnViewLog',
+    'NavAuto','NavNoSleep','NavGrs','BtnImeLogs','BtnPrograms','BtnTaskMgr','BtnUpdate','BtnViewLog',
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
@@ -739,14 +748,15 @@ if ($script:EcfEnabled) { Sync-EcfAppNames }
 
 # POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
 function Send-EcfReport {
-    param([object[]]$Checks, [switch]$Done, [switch]$Failed)
+    param([object[]]$Checks, [switch]$Done, [switch]$Failed, [switch]$Hypercare)
     if (-not $script:EcfEnabled) { return }
     if (-not $script:EcfBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
         $payload = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks }
-        if ($Done)   { $payload.done   = $true }   # markér klargøring FÆRDIG på boardet
-        if ($Failed) { $payload.failed = $true }   # markér klargøring FEJLET (rød blink)
+        if ($Done)      { $payload.done      = $true }   # markér klargøring FÆRDIG på boardet
+        if ($Failed)    { $payload.failed    = $true }   # markér klargøring FEJLET (rød blink)
+        if ($Hypercare) { $payload.hypercare = $true }   # markér HYPERCARE (orange/magenta)
         # Rapportér det planlagte genstarts-tidspunkt mens Cedra-flowet kører, så
         # boardet kan vise en live countdown. ISO 8601 round-trip ('o').
         if ($script:CedraRunning -and $script:CedraRestartAt) {
@@ -855,6 +865,141 @@ function Set-EcfFailed {
     Send-EcfReport -Failed @(@{ key = 'provisioning'; label = 'Klargøring fejlede'; status = 'fail'; message = ("App(s) fejlede: {0}" -f $list) })
 }
 
+# ---------------- HYPERCARE ----------------
+function Get-HyperPending { @($script:HyperCare.Values | Where-Object { $_.State -eq 'retrying' }) }
+function Get-HyperFailed  { @($script:HyperCare.Values | Where-Object { $_.State -eq 'failed'   }) }
+
+# Per-app retry-arbejde (baggrunds-runspace): slet KUN de angivne apps enforcement-
+# nøgler under alle Win32Apps-kontekster og genstart IME én gang, så Intune gen-
+# evaluerer + geninstallerer netop de apps. $Data = @{ Guids = @('guid1',...) }.
+$script:AppRetryWork = {
+    $base = 'HKLM:\SOFTWARE\Microsoft\IntuneManagementExtension\Win32Apps'
+    $res = @{ Deleted = 0; ImeRestarted = $false }
+    $skip = @('GRS','Reporting','OperationalState','GRSStore')
+    if (Test-Path $base) {
+        foreach ($ctx in (Get-ChildItem $base -ErrorAction SilentlyContinue)) {
+            if ($skip -contains $ctx.PSChildName) { continue }
+            foreach ($app in (Get-ChildItem $ctx.PSPath -ErrorAction SilentlyContinue)) {
+                $cn = $app.PSChildName.ToLower()
+                foreach ($g in @($Data.Guids)) {
+                    if ($g -and $cn -like "*$g*") {
+                        try {
+                            Remove-Item $app.PSPath -Recurse -Force -ErrorAction Stop
+                            $res.Deleted++
+                            $Queue.Enqueue("Hypercare: nulstillede app-status $($app.PSChildName)")
+                        } catch { $Queue.Enqueue("Hypercare: kunne ikke nulstille $($app.PSChildName): $($_.Exception.Message)") }
+                        break
+                    }
+                }
+            }
+        }
+    }
+    $svc = Get-Service -Name 'IntuneManagementExtension' -ErrorAction SilentlyContinue
+    if (-not $svc) { $svc = Get-Service -DisplayName '*Intune Management Extension*' -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    if ($svc) {
+        try { Restart-Service -InputObject $svc -Force -ErrorAction Stop; $res.ImeRestarted = $true; $Queue.Enqueue('Hypercare: IME genstartet') }
+        catch { $Queue.Enqueue("Hypercare: IME-genstart fejlede: $($_.Exception.Message)") }
+    }
+    return $res
+}
+
+# Opdatér hypercare-state ud fra et frisk app-snapshot og trig forfaldne retries.
+# $Failed = @(@{ Guid; Name }) af nu-fejlede apps; $InstalledGuids = @('guid',...).
+# Kaldes fra Report-EcfStatus hvert 60-sek-tick (både under og efter de 2 timer).
+function Update-HyperCareState {
+    param([object[]]$Failed, [string[]]$InstalledGuids)
+    if ($script:CedraTerminal) { return }
+    $now = Get-Date
+    $failedSet = @{}; foreach ($f in @($Failed)) { if ($f.Guid) { $failedSet[$f.Guid] = $true } }
+
+    # 1) Apps der er kommet sig -> ok.
+    foreach ($g in @($InstalledGuids)) {
+        if ($script:HyperCare.ContainsKey($g) -and $script:HyperCare[$g].State -ne 'failed') {
+            if ($script:HyperCare[$g].State -ne 'ok') { Write-LogLine ("Hypercare: {0} kom sig — installeret" -f $script:HyperCare[$g].Name) }
+            $script:HyperCare[$g].State = 'ok'
+        }
+    }
+    # 2) Nyligt fejlede apps -> optag i hypercare (eller genåbn hvis de var 'ok').
+    foreach ($f in @($Failed)) {
+        if (-not $script:HyperCare.ContainsKey($f.Guid)) {
+            $script:HyperCare[$f.Guid] = @{ Name = $f.Name; Attempts = 0; LastAttempt = $null; State = 'retrying' }
+            Write-LogLine ("Hypercare: {0} fejlede — starter auto-retry (op til {1} forsøg)" -f $f.Name, $script:HyperMaxAttempts) 'WARN'
+        } elseif ($script:HyperCare[$f.Guid].State -eq 'ok') {
+            $script:HyperCare[$f.Guid].State = 'retrying'
+        }
+    }
+    # 3) Trig retries for apps der er forfaldne (interval gået, forsøg tilbage).
+    $due = @()
+    foreach ($kv in $script:HyperCare.GetEnumerator()) {
+        $h = $kv.Value
+        if ($h.State -ne 'retrying' -or $h.Attempts -ge $script:HyperMaxAttempts) { continue }
+        if ($null -eq $h.LastAttempt -or ($now - $h.LastAttempt).TotalSeconds -ge $script:HyperIntervalSec) { $due += $kv.Key }
+    }
+    if ($due.Count -gt 0 -and $script:IsAdmin) {
+        foreach ($g in $due) { $script:HyperCare[$g].Attempts++; $script:HyperCare[$g].LastAttempt = $now }
+        $names = ($due | ForEach-Object { $script:HyperCare[$_].Name }) -join ', '
+        Write-LogLine ("Hypercare: forsøger geninstallation ({0})" -f $names)
+        Start-BackgroundWork -Data @{ Guids = $due } -Work $script:AppRetryWork -OnComplete { param($r) }
+    }
+    # 4) Apps der har opbrugt forsøgene og STADIG fejler -> endeligt fejlet.
+    foreach ($kv in $script:HyperCare.GetEnumerator()) {
+        $h = $kv.Value
+        if ($h.State -eq 'retrying' -and $h.Attempts -ge $script:HyperMaxAttempts -and
+            $h.LastAttempt -and ($now - $h.LastAttempt).TotalSeconds -ge $script:HyperIntervalSec -and
+            $failedSet.ContainsKey($kv.Key)) {
+            $h.State = 'failed'
+            Write-LogLine ("Hypercare: {0} fejlede ENDELIGT efter {1} forsøg" -f $h.Name, $h.Attempts) 'WARN'
+        }
+    }
+    # 5) Post-2t hypercare-tilstand: opdatér board + tjek om vi er færdige.
+    if ($script:HyperActive) {
+        Update-HyperCareBoard
+        if ((Get-HyperPending).Count -eq 0) {
+            $script:HyperActive = $false
+            $failedH = Get-HyperFailed
+            if ($failedH.Count -gt 0) {
+                $fn = @($failedH | ForEach-Object { $_.Name })
+                Write-LogLine ("Hypercare afsluttet: {0} app(s) fejlede endeligt — genstarter IKKE" -f ($fn -join ', ')) 'WARN'
+                $script:UI.TxtAutoStatus.Text = 'Hypercare: app-fejl — genstart sprunget over.'
+                Notify-AppFailure $fn
+                if ($Customer -eq 'CedraDanmark') { Set-EcfFailed $fn }
+                $script:CedraTerminal = $true
+            } else {
+                Write-LogLine 'Hypercare afsluttet: alle apps kom sig — afslutter normalt'
+                Complete-CedraProvisioning
+            }
+        }
+    }
+}
+
+# Send hypercare-billedet til boardet: en "HYPERCARE"-opsummering + én badge pr. app
+# der geninstalleres (med forsøgstæller) + evt. endeligt fejlede.
+function Update-HyperCareBoard {
+    if (-not $script:EcfEnabled) { return }
+    $checks = @(@{ key = 'provisioning'; label = 'HYPERCARE'; status = 'running'; message = 'Geninstallerer fejlede apps' })
+    foreach ($h in (Get-HyperPending)) {
+        $checks += @{ key = "hyper:$($h.Name)"; label = ("{0} (forsøg {1}/{2})" -f $h.Name, $h.Attempts, $script:HyperMaxAttempts); status = 'running'; message = 'Geninstallerer' }
+    }
+    foreach ($h in (Get-HyperFailed)) {
+        $checks += @{ key = "hyper:$($h.Name)"; label = "$($h.Name)"; status = 'fail'; message = 'Fejlede endeligt' }
+    }
+    Send-EcfReport -Hypercare $checks
+}
+
+# Afslut klargøringen normalt: fjern Hello-PIN, meld FÆRDIG, start genstart. Vagt
+# mod dobbelt-kald. Bruges både ved 2-timers-mærket (alt OK) og efter hypercare.
+function Complete-CedraProvisioning {
+    if ($script:CedraTerminal) { return }
+    $script:CedraTerminal = $true
+    $helloOk = $true
+    if ($Customer -eq 'CedraDanmark') {
+        Write-LogLine 'Fjerner Hello-PIN før genstart...'
+        $helloOk = Invoke-HelloRemoval
+    }
+    if ($helloOk) { Set-EcfDone }
+    Start-RestartCountdown 60
+}
+
 # Detektér install-status for IKKE-Win32 tracked apps (Store/M365/LOB) on-device,
 # pr. type. Kører i en baggrunds-runspace via Start-BackgroundWork -Data. Input
 # ($Data) = array af @{ Gid; Name; Kind; Detect }; output = @{ Gid; Name; Installed }.
@@ -915,7 +1060,8 @@ function Report-EcfStatus {
         param($res)
         if (-not ($res -is [hashtable]) -or -not $res.Apps) { return }
         $checks = @()
-        $failedNames = @()
+        $failedList = @()       # @{ Guid; Name } for nu-fejlede (ikke-exempt) apps
+        $installedGuids = @()   # base-GUID for installerede apps
         foreach ($a in $res.Apps) {
             # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
             # revision suffix is ignored) and look it up; otherwise fall back to $a.Name (IME-log map / GUID).
@@ -938,39 +1084,31 @@ function Report-EcfStatus {
             # Vis KUN apps der ER installeret (grønt navn) eller er FEJLET (rødt navn).
             # Pending/ukendt skjules — board'et viser kun færdige resultater.
             switch ($a.Cat) {
-                'Installed' { $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'ok';   message = '' } }
+                'Installed' {
+                    $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'ok';   message = '' }
+                    $installedGuids += $gid
+                }
                 'Failed'    {
                     if ($exempt) {
                         # By design: vis neutralt (gult) og tæl IKKE som fejl.
                         $checks += @{ key = "app:$($a.Id)"; label = "$name (afventer genstart)"; status = 'warn'; message = 'Aktiveres efter genstart' }
                     } else {
                         $checks += @{ key = "app:$($a.Id)"; label = "$name"; status = 'fail'; message = "fejlkode $($a.Err)" }
-                        $failedNames += $name
+                        $failedList += @{ Guid = $gid; Name = $name }
                     }
                 }
                 default     { }   # Pending/ukendt: vis ikke
             }
         }
-        if ($checks.Count -gt 0) { Send-EcfReport $checks }
+        # Under HYPERCARE styres board-visningen af Update-HyperCareBoard — send
+        # ikke også de normale app-badges (undgår redundans + countdown-churn).
+        if ($checks.Count -gt 0 -and -not $script:HyperActive) { Send-EcfReport $checks }
 
-        # Fejl-tracking: opdatér LIVE-status hvert tick. INGEN popup her — beskeden
-        # + beslutningen om ikke at genstarte tages FØRST ved 2-timers-mærket
-        # (Start-CedraFlow) ud fra $AppFailed/$LastFailedNames. GRS ryddes dog
-        # (tavst) ved en fejl-transition, så apps kan nå at komme sig inden for de
-        # 2 timer — hvis de gør, er $AppFailed = $false igen ved mærket.
-        if ($failedNames.Count -gt 0) {
-            $script:AppFailed = $true
-            $script:LastFailedNames = $failedNames
-            if (-not $script:AppFailureNotified) {
-                $script:AppFailureNotified = $true
-                Write-LogLine ("App(s) fejlede: {0} — rydder GRS for retry (auto-genstart vurderes ved 2-timers-mærket)" -f (($failedNames | Select-Object -Unique) -join ', ')) 'WARN'
-                try { Invoke-GrsRefresh } catch { Write-LogLine "GRS-ryd efter app-fejl fejlede: $($_.Exception.Message)" 'ERROR' }
-            }
-        } else {
-            $script:AppFailed = $false
-            $script:AppFailureNotified = $false
-            $script:LastFailedNames = @()
-        }
+        # HYPERCARE: auto-retry af fejlede apps (per-app GRS/enforcement-nulstilling),
+        # både UNDER og EFTER de 2 timer, op til 4 forsøg. Håndterer optag, retry,
+        # opbrugte forsøg og — når HyperActive (post-2t) — board-opdatering + exit
+        # (afslut normalt hvis alt kom sig, ellers meld fejl). INGEN popup her.
+        Update-HyperCareState -Failed $failedList -InstalledGuids $installedGuids
     }
 
     # Apps installed directly by CedraDeploy (e.g. Company Portal) — report from the actual appx
@@ -1545,12 +1683,9 @@ function Invoke-DeviceRestart {
 
 function Start-RestartCountdown {
     param([int]$Seconds = 60)
-    # Spring auto-genstart over hvis en app er fejlet — GRS er ryddet for retry, og
-    # maskinen skal blive kørende så installationen kan lykkes uden reboot-loop.
-    if ($script:AppFailed) {
-        Write-LogLine 'Auto-genstart sprunget over: en app er fejlet (GRS ryddet for retry)' 'WARN'
-        return
-    }
+    # App-fejl håndteres nu af hypercare + 2-timers-vurderingen i Start-CedraFlow
+    # (denne kaldes kun når klargøringen faktisk skal afsluttes), så ingen
+    # AppFailed-vagt her længere.
     Set-EcfCheck 'reboot' 'Genstart' 'running' 'Genstarter'
     $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:RestartXaml)
     $w = [Windows.Markup.XamlReader]::Load($reader)
@@ -1732,31 +1867,32 @@ function Start-CedraFlow {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
-                # FØRST nu vurderes app-fejl: er noget STADIG fejlet efter de 2 timer?
-                # (Under de 2 timer får apps lov at fejle + retrye uden at alarmere.)
-                if ($script:AppFailed) {
-                    $names = $script:LastFailedNames
-                    Write-LogLine ('2-timers-mærket nået MED app-fejl ({0}) — genstarter IKKE, kræver indgriben' -f ((@($names) | Select-Object -Unique) -join ', ')) 'WARN'
-                    $script:UI.TxtAutoStatus.Text = 'Klargøring FEJLEDE — app-fejl, genstart sprunget over.'
-                    Notify-AppFailure $names                                  # popup til teknikeren
-                    if ($Customer -eq 'CedraDanmark') { Set-EcfFailed $names } # rød blink på boardet
-                    # Ingen Hello-reset, ingen success-melding, ingen genstart. Maskinen
-                    # bliver stående (anti-sleep aktiv) til teknikeren griber ind.
+                # FØRST nu vurderes app-fejl (under de 2 timer fik apps lov at fejle +
+                # retrye uden at alarmere). Tre udfald ud fra hypercare-tilstanden:
+                $pending = Get-HyperPending    # apps der stadig geninstalleres (forsøg tilbage)
+                $failedH = Get-HyperFailed     # apps der har opbrugt forsøgene
+                if ($pending.Count -gt 0) {
+                    # Apps stadig under geninstallation -> gå i HYPERCARE-tilstand. Ingen
+                    # genstart endnu; EcfCadence-timeren driver retry + exit efter de 2 timer.
+                    $script:HyperActive = $true
+                    $names = ($pending | ForEach-Object { $_.Name }) -join ', '
+                    Write-LogLine ("2-timers-mærket nået — HYPERCARE aktiv (geninstallerer: {0})" -f $names) 'WARN'
+                    $script:UI.TxtAutoStatus.Text = "HYPERCARE — geninstallerer: $names"
+                    if ($Customer -eq 'CedraDanmark') { Update-HyperCareBoard }
                     return
                 }
-                # Slet teknikerens Hello-PIN som SIDSTE handling før genstart, så slutbrugeren
-                # bliver bedt om at oprette sin egen PIN. Ved fejl vises en rød fejl-popup.
-                $helloOk = $true
-                if ($Customer -eq 'CedraDanmark') {
-                    Write-LogLine 'Fjerner Hello-PIN før genstart...'
-                    $helloOk = Invoke-HelloRemoval
+                if ($failedH.Count -gt 0) {
+                    # Ingen under retry, men nogle er endeligt fejlet -> meld fejl, ingen genstart.
+                    $fn = @($failedH | ForEach-Object { $_.Name })
+                    Write-LogLine ("2-timers-mærket nået MED endeligt fejlede apps ({0}) — genstarter IKKE" -f ($fn -join ', ')) 'WARN'
+                    $script:UI.TxtAutoStatus.Text = 'Klargøring FEJLEDE — app-fejl, genstart sprunget over.'
+                    Notify-AppFailure $fn
+                    if ($Customer -eq 'CedraDanmark') { Set-EcfFailed $fn }
+                    $script:CedraTerminal = $true
+                    return
                 }
-                # Meld SUCCESS til boardet FØR genstart — kun hvis alt gik rent — så pladsen
-                # viser "Klargøring færdig" i stedet for "Mistet forbindelse" efter reboot.
-                if ($helloOk) { Set-EcfDone }
-                # No resume task: the user must re-authenticate (admin/TAP) at next logon anyway,
-                # so CedraDeploy is NOT auto-started after the restart.
-                Start-RestartCountdown 60
+                # Alt OK -> afslut normalt (fjern Hello-PIN, meld FÆRDIG, genstart).
+                Complete-CedraProvisioning
                 return
             }
             $g = if (($script:CedraGrsAt - $now).TotalSeconds -gt 0) { '{0:hh\:mm\:ss}' -f ($script:CedraGrsAt - $now) } else { 'udført' }
@@ -1897,6 +2033,32 @@ function Open-FolderSafe {
     try { Start-Process 'explorer.exe' -ArgumentList "`"$($Path)`"" }
     catch { Write-LogLine "Kunne ikke åbne $Label : $($_.Exception.Message)" 'ERROR' }
 }
+
+# Hent + start den nyeste version: kør bootstrap-one-lineren (irm <LaunchUrl> | iex)
+# i en ny PowerShell — den henter nyeste ecDeploy.ps1 og starter den (selv-elevering,
+# ét UAC-prompt) — og luk så denne instans. Advarer hvis en sekvens/No Sleep kører.
+function Invoke-SelfUpdate {
+    $url = if ($script:Profile -and $script:Profile.ContainsKey('LaunchUrl')) { $script:Profile.LaunchUrl } else { 'ecd.qwe.dk' }
+    $brand = if ($script:Profile) { $script:Profile.Brand } else { 'ecDeploy' }
+    $warn = if ($script:CedraRunning -or $script:NoSleepActive -or $script:SeqRunning) {
+        "`n`nBEMÆRK: en sekvens/No Sleep kører — den afbrydes når denne instans lukkes."
+    } else { '' }
+    $answer = [System.Windows.MessageBox]::Show(
+        ("Henter og starter den nyeste version af $brand fra $url.`n`nDenne instans lukkes, og den nye åbner (ét UAC-prompt).$warn`n`nFortsæt?"),
+        'Hent nyeste version', 'YesNo', 'Question')
+    if ($answer -ne 'Yes') { return }
+    Write-LogLine "Selv-opdatering: henter nyeste version fra $url ..."
+    try {
+        Start-Process 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-Command',"irm $url | iex")
+    } catch {
+        Write-LogLine "Selv-opdatering fejlede: $($_.Exception.Message)" 'ERROR'
+        [System.Windows.MessageBox]::Show("Kunne ikke starte opdateringen: $($_.Exception.Message)", 'Fejl', 'OK', 'Error') | Out-Null
+        return
+    }
+    # Luk denne instans så den nye tager over (uden luk-advarslen).
+    $script:SelfUpdating = $true
+    try { $script:Window.Close() } catch {}
+}
 #endregion
 
 #region ---------------------------------------------------------- wire up events
@@ -1956,6 +2118,7 @@ $script:UI.BtnImeLogs.Add_Click({ Open-FolderSafe $script:ImeLogsPath 'IME-logs'
 $script:UI.BtnPrograms.Add_Click({ Write-LogLine 'Åbner Programmer...'; try { Start-Process 'control.exe' -ArgumentList 'appwiz.cpl' } catch { Write-LogLine "Kunne ikke åbne Programmer: $($_.Exception.Message)" 'ERROR' } })
 $script:UI.BtnTaskMgr.Add_Click({ Write-LogLine 'Åbner Jobliste...'; try { Start-Process 'taskmgr.exe' } catch { Write-LogLine "Kunne ikke åbne Jobliste: $($_.Exception.Message)" 'ERROR' } })
 $script:UI.BtnViewLog.Add_Click({ Write-LogLine 'Åbner logfil...'; try { if (Test-Path $script:LogFile) { Start-Process 'notepad.exe' -ArgumentList "`"$($script:LogFile)`"" } else { Write-LogLine 'Logfilen findes ikke endnu' 'WARN' } } catch { Write-LogLine "Kunne ikke åbne logfil: $($_.Exception.Message)" 'ERROR' } })
+$script:UI.BtnUpdate.Add_Click({ Invoke-SelfUpdate })
 
 # Bring the window to the foreground — it launches from a hidden background process, so Windows
 # won't give it focus automatically (it would otherwise open behind the tech's terminal).
@@ -1976,7 +2139,8 @@ $script:Window.Add_Loaded({
 # Confirm-on-close while No Sleep / sequence is active.
 $script:Window.Add_Closing({
     param($src, $e)
-    if ($script:NoSleepActive -or $script:SeqRunning) {
+    # Selv-opdatering lukker med vilje for at relaunche — spring luk-advarslen over.
+    if (-not $script:SelfUpdating -and ($script:NoSleepActive -or $script:SeqRunning)) {
         $answer = [System.Windows.MessageBox]::Show(
             'No Sleep er aktiv — hvis du lukker ecDeploy kan maskinen gå i dvale. Luk alligevel?',
             'Luk ecDeploy', 'YesNo', 'Warning')
