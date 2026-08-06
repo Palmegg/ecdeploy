@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.11.0'
+$script:Version = '1.12.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -210,10 +210,13 @@ $script:FlowName      = $Flow                 # customer flow to run on load (Ce
 $script:CedraRunning  = $false
 $script:CedraResuming = $false   # true while the post-login resume flow is active (ecFleet reporting)
 $script:WuDriveBusy   = $false
-# App-fejl: sæt når mindst én tracked app er FEJLET. Blokerer auto-genstart og
-# udløser (én gang pr. fejl-transition) en popup + GRS-ryd for retry.
+# App-fejl: $AppFailed er den LIVE status (opdateres hvert 60-sek-tick af
+# Report-EcfStatus). Beslutningen om IKKE at genstarte + fejl-beskeden tages FØRST
+# ved 2-timers-mærket (Start-CedraFlow), hvor $AppFailed/$LastFailedNames aflæses.
+# $AppFailureNotified gater den (tavse) GRS-retry til én gang pr. fejl-transition.
 $script:AppFailed          = $false
 $script:AppFailureNotified = $false
+$script:LastFailedNames    = @()
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -736,13 +739,14 @@ if ($script:EcfEnabled) { Sync-EcfAppNames }
 
 # POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
 function Send-EcfReport {
-    param([object[]]$Checks, [switch]$Done)
+    param([object[]]$Checks, [switch]$Done, [switch]$Failed)
     if (-not $script:EcfEnabled) { return }
     if (-not $script:EcfBaseUrl -or -not $script:DeviceSerial -or -not $Checks -or $Checks.Count -eq 0) { return }
 
     try {
         $payload = @{ serialNumber = $script:DeviceSerial; session = $script:EcfSessionId; checks = $Checks }
-        if ($Done) { $payload.done = $true }   # markér klargøring FÆRDIG på boardet
+        if ($Done)   { $payload.done   = $true }   # markér klargøring FÆRDIG på boardet
+        if ($Failed) { $payload.failed = $true }   # markér klargøring FEJLET (rød blink)
         # Rapportér det planlagte genstarts-tidspunkt mens Cedra-flowet kører, så
         # boardet kan vise en live countdown. ISO 8601 round-trip ('o').
         if ($script:CedraRunning -and $script:CedraRestartAt) {
@@ -825,21 +829,30 @@ function Set-EcfDone {
     Send-EcfReport -Done @(@{ key = 'provisioning'; label = 'Klargøring færdig'; status = 'ok'; message = 'Klargjort og genstartet' })
 }
 
-# App-fejl-håndtering: vis en popup til teknikeren, ryd GRS så Intune forsøger
-# installationen igen, og spring auto-genstart over (håndteres i Start-RestartCountdown
-# via $script:AppFailed). Kaldes fra Report-EcfStatus ved en fejl-transition.
+# Popup ved 2-timers-mærket når en app STADIG er fejlet: klargøringstiden er
+# udløbet, genstart springes over, teknikeren skal gribe ind. (Ikke længere en
+# transition-popup undervejs — den kommer FØRST her, jf. Start-CedraFlow.)
 function Notify-AppFailure {
     param([string[]]$Names)
     $list = (@($Names) | Select-Object -Unique) -join ', '
-    Write-LogLine "App(s) fejlede: $list — rydder GRS for retry, springer auto-genstart over" 'WARN'
     try {
         [System.Windows.MessageBox]::Show(
-            "Én eller flere apps fejlede under installationen:`n`n$list`n`nGRS-nøglerne ryddes nu, så Intune forsøger installationen igen.`nMaskinen bliver IKKE genstartet automatisk.",
+            "Klargøringstiden er udløbet, men én eller flere apps er STADIG fejlet:`n`n$list`n`nMaskinen bliver IKKE genstartet automatisk. Undersøg app-installationen og genstart manuelt når den er klar.",
             'ecDeploy — app-installation fejlede',
             [System.Windows.MessageBoxButton]::OK,
             [System.Windows.MessageBoxImage]::Warning) | Out-Null
     } catch {}
-    try { Invoke-GrsRefresh } catch { Write-LogLine "GRS-ryd efter app-fejl fejlede: $($_.Exception.Message)" 'ERROR' }
+}
+
+# Meld klargøringen FEJLET til ecFleet-boardet (rød blink). Sendes ved 2-timers-
+# mærket når en app stadig er fejlet, så pladsen tydeligt viser at maskinen IKKE
+# genstartede og kræver indgriben.
+function Set-EcfFailed {
+    param([string[]]$Names)
+    if (-not $script:EcfEnabled) { return }
+    $list = (@($Names) | Select-Object -Unique) -join ', '
+    Write-LogLine 'ecFleet: melder klargøring FEJLET (app-fejl efter 2 timer)'
+    Send-EcfReport -Failed @(@{ key = 'provisioning'; label = 'Klargøring fejlede'; status = 'fail'; message = ("App(s) fejlede: {0}" -f $list) })
 }
 
 # Detektér install-status for IKKE-Win32 tracked apps (Store/M365/LOB) on-device,
@@ -940,17 +953,23 @@ function Report-EcfStatus {
         }
         if ($checks.Count -gt 0) { Send-EcfReport $checks }
 
-        # Fejl-håndtering: mindst én app fejlede -> popup + GRS-ryd (retry) + ingen
-        # auto-genstart. Udløses kun ved fejl-transition (ikke hvert 60-sek-tick).
+        # Fejl-tracking: opdatér LIVE-status hvert tick. INGEN popup her — beskeden
+        # + beslutningen om ikke at genstarte tages FØRST ved 2-timers-mærket
+        # (Start-CedraFlow) ud fra $AppFailed/$LastFailedNames. GRS ryddes dog
+        # (tavst) ved en fejl-transition, så apps kan nå at komme sig inden for de
+        # 2 timer — hvis de gør, er $AppFailed = $false igen ved mærket.
         if ($failedNames.Count -gt 0) {
             $script:AppFailed = $true
+            $script:LastFailedNames = $failedNames
             if (-not $script:AppFailureNotified) {
                 $script:AppFailureNotified = $true
-                Notify-AppFailure $failedNames
+                Write-LogLine ("App(s) fejlede: {0} — rydder GRS for retry (auto-genstart vurderes ved 2-timers-mærket)" -f (($failedNames | Select-Object -Unique) -join ', ')) 'WARN'
+                try { Invoke-GrsRefresh } catch { Write-LogLine "GRS-ryd efter app-fejl fejlede: $($_.Exception.Message)" 'ERROR' }
             }
         } else {
             $script:AppFailed = $false
             $script:AppFailureNotified = $false
+            $script:LastFailedNames = @()
         }
     }
 
@@ -1713,10 +1732,16 @@ function Start-CedraFlow {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
+                # FØRST nu vurderes app-fejl: er noget STADIG fejlet efter de 2 timer?
+                # (Under de 2 timer får apps lov at fejle + retrye uden at alarmere.)
                 if ($script:AppFailed) {
-                    # En app fejlede: spring Hello-reset + success-melding OVER — maskinen
-                    # er ikke færdig. Start-RestartCountdown springer selv genstarten over.
-                    Start-RestartCountdown 60
+                    $names = $script:LastFailedNames
+                    Write-LogLine ('2-timers-mærket nået MED app-fejl ({0}) — genstarter IKKE, kræver indgriben' -f ((@($names) | Select-Object -Unique) -join ', ')) 'WARN'
+                    $script:UI.TxtAutoStatus.Text = 'Klargøring FEJLEDE — app-fejl, genstart sprunget over.'
+                    Notify-AppFailure $names                                  # popup til teknikeren
+                    if ($Customer -eq 'CedraDanmark') { Set-EcfFailed $names } # rød blink på boardet
+                    # Ingen Hello-reset, ingen success-melding, ingen genstart. Maskinen
+                    # bliver stående (anti-sleep aktiv) til teknikeren griber ind.
                     return
                 }
                 # Slet teknikerens Hello-PIN som SIDSTE handling før genstart, så slutbrugeren
