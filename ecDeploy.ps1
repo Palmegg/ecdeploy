@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.16.0'
+$script:Version = '1.17.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -421,6 +421,17 @@ $xaml = @'
                             <Button x:Name="BtnStartAuto" Style="{StaticResource PrimaryButton}" Content="Start sekvens"/>
                             <Button x:Name="BtnStopAuto"  Style="{StaticResource GhostButton}" Content="Stop" Margin="10,0,0,0" IsEnabled="False"/>
                         </StackPanel>
+
+                        <!-- Manuel status-override til ecFleet-boardet -->
+                        <Border Height="1" Background="{StaticResource Border}" Margin="0,18,0,12"/>
+                        <TextBlock Text="Meld status manuelt til ecFleet" Foreground="{StaticResource Text}" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                        <TextBlock Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"
+                                   Text="Overstyr boardets status hvis du fysisk har bekræftet maskinen. Dette låser statussen — den automatiske rapportering for denne maskine stoppes, så din melding ikke bliver overskrevet."/>
+                        <TextBlock x:Name="TxtManualStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="BtnMeldOk"   Style="{StaticResource PrimaryButton}" Content="Meld KLARGJORT"/>
+                            <Button x:Name="BtnMeldFejl" Style="{StaticResource GhostButton}" Content="Meld FEJLET" Margin="10,0,0,0"/>
+                        </StackPanel>
                     </StackPanel>
 
                     <!-- No Sleep -->
@@ -545,6 +556,7 @@ foreach ($name in @(
     'NavAuto','NavNoSleep','NavGrs','BtnImeLogs','BtnPrograms','BtnTaskMgr','BtnUpdate','BtnViewLog',
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
+    'TxtManualStatus','BtnMeldOk','BtnMeldFejl',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
     'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme',
     'NavHello','PanelHello','TxtHelloStatus','BtnRunHello',
@@ -1011,6 +1023,45 @@ function Set-EcfFailed {
     $list = (@($Names) | Select-Object -Unique) -join ', '
     Write-LogLine 'ecFleet: melder klargøring FEJLET (app-fejl efter 2 timer)'
     Send-EcfReport -Failed @(@{ key = 'provisioning'; label = 'Klargøring fejlede'; status = 'fail'; message = ("App(s) fejlede: {0}" -f $list) })
+}
+
+# Manuel status-override: teknikeren melder KLARGJORT/FEJLET til ecFleet-boardet,
+# fx fordi maskinen fysisk er bekræftet OK. LÅSER statussen ved at stoppe den
+# automatiske rapportering (cadence + hypercare/auto-afslutning), så meldingen ikke
+# overskrives. Genstarter IKKE maskinen — ren status-override.
+function Send-ManualStatus {
+    param([ValidateSet('done','failed')][string]$Kind)
+    if (-not $script:EcfEnabled) {
+        [System.Windows.MessageBox]::Show('ecFleet er ikke aktiv i denne profil — kan ikke melde status.', 'Meld status', 'OK', 'Information') | Out-Null
+        return
+    }
+    if (-not $script:DeviceSerial) {
+        [System.Windows.MessageBox]::Show('Intet serienummer registreret endnu — scan S/N i ecFleet først.', 'Meld status', 'OK', 'Warning') | Out-Null
+        return
+    }
+    if ($Kind -eq 'done') {
+        $answer = [System.Windows.MessageBox]::Show(
+            "Meld denne maskine som KLARGJORT (færdig) til ecFleet?`n`nStatussen låses, og den automatiske rapportering stoppes. Maskinen genstartes IKKE.",
+            'Meld KLARGJORT', 'YesNo', 'Question')
+    } else {
+        $answer = [System.Windows.MessageBox]::Show(
+            "Meld denne maskine som FEJLET til ecFleet?`n`nStatussen låses, og den automatiske rapportering stoppes.",
+            'Meld FEJLET', 'YesNo', 'Warning')
+    }
+    if ($answer -ne 'Yes') { return }
+    # Lås statussen: stop auto-rapportering + hypercare/auto-afslutning.
+    $script:CedraTerminal = $true
+    $script:HyperActive = $false
+    Stop-EcfCadence
+    if ($Kind -eq 'done') {
+        Set-EcfDone
+        Write-LogLine 'Manuelt meldt KLARGJORT til ecFleet (tekniker-override)'
+        $script:UI.TxtManualStatus.Text = ("Meldt KLARGJORT kl. {0} — status låst." -f (Get-Date).ToString('HH:mm'))
+    } else {
+        Set-EcfFailed @('Manuelt meldt fejlet af tekniker')
+        Write-LogLine 'Manuelt meldt FEJLET til ecFleet (tekniker-override)'
+        $script:UI.TxtManualStatus.Text = ("Meldt FEJLET kl. {0} — status låst." -f (Get-Date).ToString('HH:mm'))
+    }
 }
 
 # ---------------- HYPERCARE ----------------
@@ -2252,6 +2303,8 @@ $script:UI.BtnDiag.Add_Click({ Invoke-Diagnostics })
 $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
 $script:UI.BtnStopAuto.Add_Click({ if ($script:CedraRunning) { Stop-CedraFlow } else { Stop-AutoSequence } })
+$script:UI.BtnMeldOk.Add_Click({ Send-ManualStatus -Kind 'done' })
+$script:UI.BtnMeldFejl.Add_Click({ Send-ManualStatus -Kind 'failed' })
 
 $script:UI.BtnRunGrs.Add_Click({
     $answer = [System.Windows.MessageBox]::Show(
