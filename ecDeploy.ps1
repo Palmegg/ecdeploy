@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.14.1'
+$script:Version = '1.15.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -762,6 +762,45 @@ function Start-NetWatch {
     $script:NetWatchTimer.Add_Tick({ Invoke-NetWatchTick })
     $script:NetWatchTimer.Start()
     Write-LogLine ("Netværks-overvågning aktiv (tjek hver {0}s — genstarter kort efter {1} fejl i træk)" -f $iv, $script:NetFailThreshold)
+}
+#endregion
+
+#region ---------------------------------------------------------- time / timezone sync
+# Nogle maskiner har et forkert ur/tidszone ved opstart (giver auth-/Intune-fejl).
+# Kør en engangs-synkronisering i baggrunden: tving Windows Time til at resynkronisere
+# og aktivér automatisk tidszone (sætter zonen efter placering). Best-effort.
+$script:TimeSyncWork = {
+    # 1) Ur: sørg for at Windows Time-tjenesten kører + tving en resync mod tidskilden.
+    try {
+        Set-Service -Name w32time -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name w32time -ErrorAction SilentlyContinue
+        & w32tm.exe /resync /force 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $Queue.Enqueue('Tid: uret synkroniseret (w32tm /resync)')
+        } else {
+            & w32tm.exe /resync /rediscover 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { $Queue.Enqueue('Tid: uret synkroniseret (efter rediscover)') }
+            else { $Queue.Enqueue("Tid: kunne ikke synkronisere uret (w32tm exit $LASTEXITCODE)") }
+        }
+    } catch { $Queue.Enqueue("Tid: fejl ved ur-synkronisering: $($_.Exception.Message)") }
+    # 2) Tidszone: aktivér automatisk opdatering (sætter zonen efter placering).
+    try {
+        Set-Service -Name tzautoupdate -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name tzautoupdate -ErrorAction SilentlyContinue
+        $Queue.Enqueue('Tidszone: automatisk opdatering aktiveret')
+    } catch { $Queue.Enqueue("Tidszone: kunne ikke aktivere auto-opdatering: $($_.Exception.Message)") }
+    return @{ Done = $true }
+}
+
+# Kør tid/tidszone-sync én gang ved opstart (kun i en kunde-profil + som admin).
+function Start-TimeSync {
+    if (-not $script:Profile) { return }
+    if (-not $script:IsAdmin) { Write-LogLine 'Tid/tidszone-sync sprunget over (kræver administrator)' 'WARN'; return }
+    Write-LogLine 'Synkroniserer ur + tidszone...'
+    Start-BackgroundWork -Work $script:TimeSyncWork -OnComplete {
+        param($res)
+        Write-LogLine 'Ur/tidszone-synkronisering udført'
+    }
 }
 #endregion
 
@@ -2293,6 +2332,12 @@ function Remove-HelloContainer {
                 Write-LogLine ("Hello for Business-container fjernet (som {0})." -f $who)
                 return $true
             }
+            # NTE_NOT_FOUND (0x80090011): der er INGEN container at slette — det er
+            # ikke en fejl. Behandl som succes, så flowet fortsætter (ingen popup).
+            if ($rc -in -2146893807, 2148073489) {
+                Write-LogLine ("Hello for Business-container ikke til stede (som {0}) — intet at fjerne, fortsætter." -f $who)
+                return $true
+            }
             Write-LogLine ("Hello for Business-container: exit {0} (som {1})." -f $rc, $who) 'ERROR'
             $script:HelloLastError = ("certutil afsluttede med exit-kode {0} (som bruger {1})." -f $rc, $who)
             return $false
@@ -2300,6 +2345,10 @@ function Remove-HelloContainer {
         # Ingen indlogget bruger fundet — fallback: kør direkte.
         $out = & certutil.exe -deleteHelloContainer 2>&1
         if ($LASTEXITCODE -eq 0) { Write-LogLine 'Hello for Business-container fjernet.'; return $true }
+        if ($LASTEXITCODE -in -2146893807, 2148073489) {
+            Write-LogLine 'Hello for Business-container ikke til stede — intet at fjerne, fortsætter.'
+            return $true
+        }
         Write-LogLine ("Hello for Business-container: certutil returnerede {0}." -f $LASTEXITCODE) 'ERROR'
         $script:HelloLastError = ("certutil afsluttede med exit-kode {0} (ingen indlogget bruger fundet)." -f $LASTEXITCODE)
         return $false
@@ -2359,6 +2408,7 @@ if ($script:IsAdmin) { Write-LogLine 'Kører som administrator' }
 else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger er deaktiveret' 'WARN' }
 Update-SequenceControls
 Start-NetWatch   # netværks-watchdog: genstart kortet hvis internettet tabes
+Start-TimeSync   # engangs ur- + tidszone-synkronisering
 
 # Timer that refreshes the live IME-log view (started only while that panel is visible).
 $script:ImeLogTimer = New-Object System.Windows.Threading.DispatcherTimer
