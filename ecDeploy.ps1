@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.13.0'
+$script:Version = '1.14.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -225,6 +225,14 @@ $script:HyperCare        = @{}
 $script:HyperActive      = $false       # true når post-2t hypercare-board-tilstanden kører
 $script:CedraTerminal    = $false       # true når klargøringen er endeligt afsluttet (done/failed)
 $script:SelfUpdating     = $false       # true mens "Hent nyeste version" lukker for at relaunche
+# Netværks-watchdog: tjek internet løbende; tab -> genstart netværkskortet (nogle
+# USB-C-hub-adaptere mister forbindelsen). Kræver admin (Restart-NetAdapter).
+$script:NetWatchTimer      = $null
+$script:NetWatchBusy       = $false
+$script:NetFailCount       = 0
+$script:NetLastRestart     = $null      # tidspunkt for sidste kort-genstart (cooldown)
+$script:NetFailThreshold   = 2          # antal fejl-tjek i træk før genstart
+$script:NetRestartCooldownSec = 120     # min. sekunder mellem to kort-genstarter
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -654,6 +662,106 @@ function Start-BackgroundWork {
         }
     })
     $timer.Start()
+}
+#endregion
+
+#region ---------------------------------------------------------- network watchdog
+# Baggrunds-tjek af internet: TCP-connect (inkl. DNS) til de endpoints en klargøring
+# faktisk skal bruge. Online hvis MINDST ét svarer. Returnerer @{ Online = bool }.
+$script:NetCheckWork = {
+    $targets = @(
+        @{ H = 'login.microsoftonline.com'; P = 443 },
+        @{ H = 'www.msftconnecttest.com';   P = 80  },
+        @{ H = '1.1.1.1';                    P = 443 }
+    )
+    $online = $false
+    foreach ($t in $targets) {
+        try {
+            $c = New-Object System.Net.Sockets.TcpClient
+            $iar = $c.BeginConnect($t.H, $t.P, $null, $null)
+            if ($iar.AsyncWaitHandle.WaitOne(2500, $false) -and $c.Connected) { $online = $true }
+            $c.Close()
+        } catch {}
+        if ($online) { break }
+    }
+    return @{ Online = $online }
+}
+
+# Genstart de fysiske netværkskort (disable+enable via Restart-NetAdapter). Tager
+# de kort der er Up/Disconnected; ellers alle fysiske. Kræver admin.
+$script:NetRestartWork = {
+    $restarted = @()
+    try {
+        $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -in 'Up', 'Disconnected' }
+        if (-not $adapters) { $adapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue }
+        foreach ($a in @($adapters)) {
+            try {
+                Restart-NetAdapter -Name $a.Name -ErrorAction Stop
+                $restarted += $a.Name
+                $Queue.Enqueue("Netvaerk: genstartede kort '$($a.Name)'")
+            } catch {
+                $Queue.Enqueue("Netvaerk: kunne ikke genstarte '$($a.Name)': $($_.Exception.Message)")
+            }
+        }
+    } catch { $Queue.Enqueue("Netvaerk: fejl ved genstart af kort: $($_.Exception.Message)") }
+    return @{ Restarted = $restarted }
+}
+
+function Restart-NetworkAdapters {
+    if (-not $script:IsAdmin) { Write-LogLine 'Netværk: kan ikke genstarte kort (ikke administrator)' 'WARN'; return }
+    Write-LogLine 'Netværk: forbindelse tabt — genstarter netværkskort...' 'WARN'
+    Start-BackgroundWork -Work $script:NetRestartWork -OnComplete {
+        param($res)
+        if ($res -is [hashtable] -and @($res.Restarted).Count -gt 0) {
+            Write-LogLine ("Netværk: genstartede {0} kort — afventer reconnect" -f @($res.Restarted).Count)
+        } else {
+            Write-LogLine 'Netværk: ingen kort blev genstartet (se log)' 'WARN'
+        }
+    }
+}
+
+function Invoke-NetWatchTick {
+    if ($script:NetWatchBusy) { return }
+    $script:NetWatchBusy = $true
+    Start-BackgroundWork -Work $script:NetCheckWork -OnComplete {
+        param($res)
+        $script:NetWatchBusy = $false
+        $online = ($res -is [hashtable]) -and $res.Online
+        if ($online) {
+            if ($script:NetFailCount -gt 0) { Write-LogLine 'Netværk: forbindelse OK igen' }
+            $script:NetFailCount = 0
+            return
+        }
+        $script:NetFailCount++
+        Write-LogLine ("Netværk: ingen forbindelse ({0}/{1})" -f $script:NetFailCount, $script:NetFailThreshold) 'WARN'
+        if ($script:NetFailCount -ge $script:NetFailThreshold) {
+            # Cooldown: giv kortet tid til at komme op igen efter en genstart.
+            $now = Get-Date
+            if ($script:NetLastRestart -and ($now - $script:NetLastRestart).TotalSeconds -lt $script:NetRestartCooldownSec) {
+                return
+            }
+            $script:NetLastRestart = $now
+            $script:NetFailCount = 0
+            Restart-NetworkAdapters
+        }
+    }
+}
+
+# Start watchdog'en (kun i en kunde-profil + som admin; kan slås fra med
+# CEDRA_NETWATCH=0, interval sættes med CEDRA_NETWATCH_SEC).
+function Start-NetWatch {
+    if ($script:NetWatchTimer) { return }
+    if (-not $script:Profile) { return }               # kun i CedraDeploy (kunde-launch)
+    if (-not $script:IsAdmin) { Write-LogLine 'Netværks-overvågning fra (kræver administrator)' 'WARN'; return }
+    if ($env:CEDRA_NETWATCH -eq '0') { return }
+    $iv = 20
+    if ($env:CEDRA_NETWATCH_SEC) { [void][int]::TryParse($env:CEDRA_NETWATCH_SEC, [ref]$iv) }
+    $script:NetWatchTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:NetWatchTimer.Interval = [TimeSpan]::FromSeconds([math]::Max(5, $iv))
+    $script:NetWatchTimer.Add_Tick({ Invoke-NetWatchTick })
+    $script:NetWatchTimer.Start()
+    Write-LogLine ("Netværks-overvågning aktiv (tjek hver {0}s — genstarter kort efter {1} fejl i træk)" -f $iv, $script:NetFailThreshold)
 }
 #endregion
 
@@ -2250,6 +2358,7 @@ Write-LogLine "ecDeploy v$script:Version startet"
 if ($script:IsAdmin) { Write-LogLine 'Kører som administrator' }
 else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger er deaktiveret' 'WARN' }
 Update-SequenceControls
+Start-NetWatch   # netværks-watchdog: genstart kortet hvis internettet tabes
 
 # Timer that refreshes the live IME-log view (started only while that panel is visible).
 $script:ImeLogTimer = New-Object System.Windows.Threading.DispatcherTimer
