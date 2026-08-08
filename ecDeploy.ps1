@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.19.0'
+$script:Version = '1.19.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -821,12 +821,16 @@ function Start-TimeSync {
 # pr. fysisk netværkskort. Komplementerer netværks-watchdog'en (som genstarter
 # kortet hvis det ALLIGEVEL dropper).
 $script:UsbPowerWork = {
-    # 1) USB selective suspend FRA på den aktive power plan (AC + DC).
+    # 1) USB selective suspend FRA på den aktive power plan (AC + DC). Brug GUID'er
+    #    (SUB_USB/USBSELECTSUSPEND-aliaserne er IKKE registreret -> "invalid parameters").
     try {
-        & powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 2>&1 | Out-Null
-        & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 2>&1 | Out-Null
+        $usbSub = '2a737441-1930-4402-8d77-b2bebba308a3'   # USB-indstillinger
+        $usbSet = '48e6b7a6-50f5-4782-a5d4-53bb8f07e226'   # selektiv USB-afbrydelse
+        $o1 = & powercfg.exe /setacvalueindex SCHEME_CURRENT $usbSub $usbSet 0 2>&1; $e1 = $LASTEXITCODE
+        $o2 = & powercfg.exe /setdcvalueindex SCHEME_CURRENT $usbSub $usbSet 0 2>&1; $e2 = $LASTEXITCODE
         & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
-        $Queue.Enqueue('Strøm: USB selective suspend slået fra')
+        if ($e1 -eq 0 -and $e2 -eq 0) { $Queue.Enqueue('Strøm: USB selective suspend slået fra') }
+        else { $Queue.Enqueue("Strøm: USB selective suspend fejlede (ac=$e1 dc=$e2): $o1 $o2") }
     } catch { $Queue.Enqueue("Strøm: kunne ikke slå USB selective suspend fra: $($_.Exception.Message)") }
 
     # 2) Pr. fysisk netværkskort: "Tillad computeren at slukke enheden" FRA via

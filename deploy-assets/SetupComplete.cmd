@@ -14,8 +14,11 @@ REM ============================================================================
 REM --- 1) USB selective suspend FRA (AC + DC) -----------------------------------
 REM  Den vigtigste: forhindrer at Windows "sover" USB-enheden (og dropper linket).
 REM  Global indstilling -> gaelder ogsaa adaptere der saettes i SENERE (ved OOBE).
-powercfg /setacvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0
-powercfg /setdcvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0
+REM  Bruger GUID'er (SUB_USB/USBSELECTSUSPEND-aliaserne findes ikke overalt ->
+REM  "invalid parameters"). 2a737441... = USB-indstillinger, 48e6b7a6... = selektiv
+REM  USB-afbrydelse. 0 = Deaktiveret.
+powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0
+powercfg /setdcvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0
 powercfg /setactive SCHEME_CURRENT
 
 REM --- 2) "Tillad computeren at slukke enheden" FRA paa netvaerkskort -----------
