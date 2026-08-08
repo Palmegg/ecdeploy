@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.23.0'
+$script:Version = '1.24.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1149,10 +1149,34 @@ function Set-EcfFailed {
     Send-EcfReport -Failed @(@{ key = 'provisioning'; label = 'Klargøring fejlede'; status = 'fail'; message = ("App(s) fejlede: {0}" -f $list) })
 }
 
+# Dialog til manuel "Meld klargjort": spørg om genstart + flueben (auto-checked) der
+# fjerner Windows Hello (WHFB) for den indloggede bruger.
+$script:MeldXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Meld klargjort" Height="270" Width="480" WindowStartupLocation="CenterScreen"
+        Background="#15161A" FontFamily="Segoe UI" FontSize="13" ResizeMode="NoResize" Topmost="True">
+    <StackPanel Margin="24">
+        <TextBlock Text="Meld denne maskine som KLARGJORT til ecFleet." Foreground="#E6E7EA" FontSize="15" TextWrapping="Wrap"/>
+        <TextBlock Text="Statussen låses, og den automatiske rapportering stoppes." Foreground="#9AA0AA" TextWrapping="Wrap" Margin="0,6,0,0"/>
+        <CheckBox x:Name="ChkWhfb" IsChecked="True" Foreground="#E6E7EA" Margin="0,18,0,0"
+                  Content="Fjern Windows Hello-PIN (WHFB) på den indloggede bruger"/>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,22,0,0">
+            <Button x:Name="BtnMeldCancel" Content="Annuller" Padding="14,6" Margin="0,0,10,0"
+                    Background="#2B2C33" Foreground="#E6E7EA" BorderBrush="#3A3B43" BorderThickness="1" Cursor="Hand"/>
+            <Button x:Name="BtnMeldOnly" Content="Meld (ingen genstart)" Padding="14,6" Margin="0,0,10,0"
+                    Background="#2B2C33" Foreground="#E6E7EA" BorderBrush="#3A3B43" BorderThickness="1" Cursor="Hand"/>
+            <Button x:Name="BtnMeldRestart" Content="Meld + genstart" Padding="14,6"
+                    Background="#1F3A24" Foreground="#CFE9D4" BorderThickness="0" Cursor="Hand"/>
+        </StackPanel>
+    </StackPanel>
+</Window>
+'@
+
 # Manuel status-override: teknikeren melder maskinen KLARGJORT til ecFleet-boardet,
 # fx fordi den fysisk er bekræftet OK men boardet viser noget andet. LÅSER statussen
 # ved at stoppe den automatiske rapportering (cadence + hypercare/auto-afslutning),
-# så meldingen ikke overskrives. Genstarter IKKE maskinen — ren status-override.
+# så meldingen ikke overskrives. Popup: vælg genstart + (auto-checked) WHFB-fjernelse.
 function Send-ManualStatus {
     if (-not $script:EcfEnabled) {
         [System.Windows.MessageBox]::Show('ecFleet er ikke aktiv i denne profil — kan ikke melde status.', 'Meld status', 'OK', 'Information') | Out-Null
@@ -1162,19 +1186,40 @@ function Send-ManualStatus {
         [System.Windows.MessageBox]::Show('Intet serienummer registreret endnu — scan S/N i ecFleet først.', 'Meld status', 'OK', 'Warning') | Out-Null
         return
     }
-    $answer = [System.Windows.MessageBox]::Show(
-        "Meld denne maskine som KLARGJORT (færdig) til ecFleet?`n`nStatussen låses, og den automatiske rapportering stoppes. Maskinen genstartes IKKE.",
-        'Meld KLARGJORT', 'YesNo', 'Question')
-    if ($answer -ne 'Yes') { return }
+    # Vis dialogen: genstart ja/nej + flueben (auto-checked) for WHFB-fjernelse.
+    $reader = New-Object System.Xml.XmlNodeReader ([xml]$script:MeldXaml)
+    $dlg = [Windows.Markup.XamlReader]::Load($reader)
+    try { $dlg.Owner = $script:Window } catch {}
+    if ($script:Window -and $script:Window.Icon) { try { $dlg.Icon = $script:Window.Icon } catch {} }
+    $script:MeldWindow = $dlg
+    $script:MeldChoice = 'cancel'
+    $chk = $dlg.FindName('ChkWhfb')
+    $dlg.FindName('BtnMeldCancel').Add_Click({  $script:MeldChoice = 'cancel';  $script:MeldWindow.Close() })
+    $dlg.FindName('BtnMeldOnly').Add_Click({    $script:MeldChoice = 'only';    $script:MeldWindow.Close() })
+    $dlg.FindName('BtnMeldRestart').Add_Click({ $script:MeldChoice = 'restart'; $script:MeldWindow.Close() })
+    $dlg.ShowDialog() | Out-Null
+    if ($script:MeldChoice -eq 'cancel') { return }
+    $removeWhfb = [bool]$chk.IsChecked
+
     # Lås statussen: stop auto-rapportering + hypercare/auto-afslutning.
     $script:CedraTerminal = $true
     $script:HyperActive = $false
     Stop-EcfCadence
+    # Fjern WHFB på den indloggede bruger (hvis flueben sat) FØR vi melder færdig/genstarter.
+    if ($removeWhfb) {
+        Write-LogLine 'Meld klargjort: fjerner Windows Hello-PIN (WHFB) for indlogget bruger...'
+        Invoke-HelloRemoval | Out-Null
+    }
     Set-EcfDone
     Write-LogLine 'Manuelt meldt KLARGJORT til ecFleet (tekniker-override)'
     $script:UI.TxtManualStatus.Text = ("Meldt KLARGJORT kl. {0} — status låst." -f (Get-Date).ToString('HH:mm'))
     $script:UI.BtnBarKlar.Visibility  = 'Collapsed'
     $script:UI.BtnBarHyper.Visibility = 'Collapsed'
+    # Start genstart-nedtælling hvis teknikeren valgte det.
+    if ($script:MeldChoice -eq 'restart') {
+        Write-LogLine 'Meld klargjort: starter genstart-nedtælling (60 s)'
+        Start-RestartCountdown 60
+    }
 }
 
 # Tvinger genstarts-vurderingen (2-timers-mærket) til at ske NU — som om timeren var
