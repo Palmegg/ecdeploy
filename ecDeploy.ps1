@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.22.1'
+$script:Version = '1.22.2'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -227,7 +227,7 @@ $script:NetFailCount       = 0
 $script:NetLastRestart     = $null      # tidspunkt for sidste kort-genstart (cooldown)
 $script:NetFailThreshold   = 2          # antal fejl-tjek i træk før genstart
 $script:NetRestartCooldownSec = 120     # min. sekunder mellem to kort-genstarter
-$script:NetAutoRestart     = $true      # auto-genstart af netkort ved forbindelsestab (top-bar toggle)
+$script:NetAutoRestart     = $false     # auto-genstart af netkort ved forbindelsestab — FRA som standard (top-bar toggle)
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -357,8 +357,8 @@ $xaml = @'
                     </StackPanel>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button x:Name="BtnBarNet" Style="{StaticResource BarButton}" Content="Auto-net: TIL" Margin="5,0" Padding="10,4"
-                            Background="#1F3A24" Foreground="#CFE9D4"/>
+                    <Button x:Name="BtnBarNet" Style="{StaticResource BarButton}" Content="Auto-net: FRA" Margin="5,0" Padding="10,4"
+                            Background="#3A2424" Foreground="#E8B9B9"/>
                     <Button x:Name="BtnBarHyper" Style="{StaticResource BarButton}" Content="Start hypercare" Margin="5,0" Padding="10,4" Visibility="Collapsed"
                             Background="#4A2E12" Foreground="#F2D9B0"/>
                     <Button x:Name="BtnBarKlar" Style="{StaticResource BarButton}" Content="Meld klargjort" Margin="5,0" Padding="10,4" Visibility="Collapsed"
@@ -793,7 +793,8 @@ function Start-NetWatch {
     $script:NetWatchTimer.Interval = [TimeSpan]::FromSeconds([math]::Max(5, $iv))
     $script:NetWatchTimer.Add_Tick({ Invoke-NetWatchTick })
     $script:NetWatchTimer.Start()
-    Write-LogLine ("Netværks-overvågning aktiv (tjek hver {0}s — genstarter kort efter {1} fejl i træk)" -f $iv, $script:NetFailThreshold)
+    $autoTxt = if ($script:NetAutoRestart) { ("auto-genstart TIL efter {0} fejl i træk" -f $script:NetFailThreshold) } else { 'auto-genstart FRA (slå til i top-baren)' }
+    Write-LogLine ("Netværks-overvågning aktiv (tjek hver {0}s — {1})" -f $iv, $autoTxt)
 }
 
 # Top-bar toggle: slå auto-genstart af netkort til/fra. Overvågningen kører videre;
@@ -1798,14 +1799,21 @@ function Update-AppStatus {
         $colors = @{ Installed = '#22C55E'; Failed = '#EF4444'; Pending = '#F59E0B'; Unknown = '#9AA0AA' }
         $order = @{ Failed = 0; Pending = 1; Unknown = 2; Installed = 3 }
         foreach ($a in ($res.Apps | Sort-Object @{ Expression = { $order[$_.Cat] } })) {
+            # Foretræk ecFleet-navnet (den valgte app) frem for log-gættet/GUID'en.
+            $display = $a.Name
+            if ($a.Id -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                $gid = $matches[1].ToLower()
+                if ($script:EcfAppNames.ContainsKey($gid)) { $display = $script:EcfAppNames[$gid] }
+            }
+            $isGuid = ($display -eq $a.Id)
             $row = New-Object System.Windows.Controls.DockPanel
             $row.Margin = '0,2'
             $chip = New-Object System.Windows.Controls.TextBlock
             $chip.Text = $a.Label; $chip.Width = 90; $chip.Foreground = $colors[$a.Cat]
             $id = New-Object System.Windows.Controls.TextBlock
-            $id.Text = $a.Name + $(if ($null -ne $a.Err -and $a.Err -ne 0) { "   fejlkode: $($a.Err)" } else { '' })
+            $id.Text = $display + $(if ($null -ne $a.Err -and $a.Err -ne 0) { "   fejlkode: $($a.Err)" } else { '' })
             $id.Foreground = '#C8CBD2'; $id.FontSize = 12; $id.TextTrimming = 'CharacterEllipsis'
-            if ($a.Name -eq $a.Id) { $id.FontFamily = 'Consolas'; $id.FontSize = 11 }   # GUID fallback: monospace
+            if ($isGuid) { $id.FontFamily = 'Consolas'; $id.FontSize = 11 }   # GUID fallback: monospace
             [void]$row.Children.Add($chip); [void]$row.Children.Add($id)
             [void]$script:UI.AppsList.Children.Add($row)
         }
