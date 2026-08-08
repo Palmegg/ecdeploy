@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.18.0'
+$script:Version = '1.19.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -810,6 +810,56 @@ function Start-TimeSync {
     Start-BackgroundWork -Work $script:TimeSyncWork -OnComplete {
         param($res)
         Write-LogLine 'Ur/tidszone-synkronisering udført'
+    }
+}
+#endregion
+
+#region ---------------------------------------------------------- USB/NIC power saving
+# Nogle USB-C→Ethernet-adaptere (fx Realtek på Lenovo X1) taber forbindelsen fordi
+# Windows "sover" USB-enheden. Slå strømstyringen fra: (1) USB selective suspend
+# (global — den vigtigste), og (2) best-effort "sluk enheden for at spare strøm"
+# pr. fysisk netværkskort. Komplementerer netværks-watchdog'en (som genstarter
+# kortet hvis det ALLIGEVEL dropper).
+$script:UsbPowerWork = {
+    # 1) USB selective suspend FRA på den aktive power plan (AC + DC).
+    try {
+        & powercfg.exe /setacvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 2>&1 | Out-Null
+        & powercfg.exe /setdcvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0 2>&1 | Out-Null
+        & powercfg.exe /setactive SCHEME_CURRENT 2>&1 | Out-Null
+        $Queue.Enqueue('Strøm: USB selective suspend slået fra')
+    } catch { $Queue.Enqueue("Strøm: kunne ikke slå USB selective suspend fra: $($_.Exception.Message)") }
+
+    # 2) Pr. fysisk netværkskort: "Tillad computeren at slukke enheden" FRA via
+    #    WMI (MSPower_DeviceEnable). Best-effort — matcher på PnP-enheds-id.
+    try {
+        $nics = Get-NetAdapter -Physical -ErrorAction SilentlyContinue
+        $pm = @(Get-CimInstance -Namespace root/wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue)
+        foreach ($n in @($nics)) {
+            $pnp = "$($n.PnPDeviceID)"
+            if (-not $pnp) { continue }
+            foreach ($m in ($pm | Where-Object { $_.InstanceName -like "$pnp*" })) {
+                if ($m.Enable -ne $false) {
+                    try {
+                        $m.Enable = $false
+                        Set-CimInstance -InputObject $m -ErrorAction Stop
+                        $Queue.Enqueue("Strøm: slog strømstyring fra på kort '$($n.Name)'")
+                    } catch { $Queue.Enqueue("Strøm: kunne ikke slå strømstyring fra på '$($n.Name)': $($_.Exception.Message)") }
+                }
+            }
+        }
+    } catch { $Queue.Enqueue("Strøm: NIC-strømstyring (best-effort) fejlede: $($_.Exception.Message)") }
+    return @{ Done = $true }
+}
+
+# Kør én gang ved opstart (kun kunde-profil + admin). Kan slås fra med CEDRA_NOPWR=1.
+function Disable-UsbNicPowerSaving {
+    if (-not $script:Profile) { return }
+    if ($env:CEDRA_NOPWR -eq '1') { return }
+    if (-not $script:IsAdmin) { Write-LogLine 'USB/NIC-strømstyring: sprunget over (kræver administrator)' 'WARN'; return }
+    Write-LogLine 'Slår USB selective suspend + NIC-strømstyring fra (mod forbindelses-drops)...'
+    Start-BackgroundWork -Work $script:UsbPowerWork -OnComplete {
+        param($res)
+        Write-LogLine 'USB/NIC-strømstyring: konfigureret'
     }
 }
 #endregion
@@ -2498,6 +2548,7 @@ else { Write-LogLine 'Kører IKKE som administrator — privilegerede handlinger
 Update-SequenceControls
 Start-NetWatch   # netværks-watchdog: genstart kortet hvis internettet tabes
 Start-TimeSync   # engangs ur- + tidszone-synkronisering
+Disable-UsbNicPowerSaving   # slå USB/NIC-strømstyring fra (mod USB-C-ethernet-drops)
 
 # Timer that refreshes the live IME-log view (started only while that panel is visible).
 $script:ImeLogTimer = New-Object System.Windows.Threading.DispatcherTimer
