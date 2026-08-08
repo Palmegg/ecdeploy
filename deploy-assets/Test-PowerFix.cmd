@@ -43,10 +43,6 @@ echo [4] NIC-stroemstyring fra (PnPCapabilities=24)
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$n=0; Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { try { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force | Out-Null; $n++ } catch {} }; Write-Host ('     RESULTAT: sat paa ' + $n + ' netvaerkskort')"
 echo.
 
-echo [5] Genstarter forbundne KABLEDE netvaerkskort (ikke WiFi)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$r=@(Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object { $_.MediaType -ne 'Native 802.11' -and ($_.Status -eq 'Up' -or $_.Status -eq 'Disconnected') }); if(-not $r){ Write-Host '     (ingen kablede kort forbundet)' }; foreach($a in $r){ Write-Host ('     genstarter: ' + $a.Name); try { Restart-NetAdapter -Name $a.Name -Confirm:$false -ErrorAction Stop; Write-Host '       OK' } catch { Write-Host ('       FEJL: ' + $_.Exception.Message) } }"
-echo.
-
 echo === Verificering: begge linjer skal vise 0x00000000 ===
 powercfg /query SCHEME_CURRENT %USBSUB% %USBSET% | findstr /i "Current"
 echo.
