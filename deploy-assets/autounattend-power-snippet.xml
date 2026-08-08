@@ -1,0 +1,47 @@
+<!--
+  Strøm-fix mod USB-C -> Ethernet forbindelses-drops, til autounattend.xml.
+
+  KOPIÉR <settings pass="specialize">-blokken ind i din autounattend.xml.
+  Har du allerede en specialize-pass, så flet <RunSynchronousCommand>-linjerne
+  ind i din eksisterende Microsoft-Windows-Deployment/RunSynchronous (og giv dem
+  unikke <Order>-numre).
+
+  Kører som SYSTEM UNDER installationen (specialize-passet, før OOBE) — kræver
+  hverken $OEM$-mapper eller SetupComplete.cmd (som er slået fra ved OEM-nøgler).
+
+  Gør to ting:
+   1) Slår USB selective suspend fra (global -> gælder også adaptere der sættes i
+      senere, fx ved OOBE). Den vigtigste.
+   2) Slår "Tillad computeren at slukke enheden" fra på netværkskort der er til
+      stede (PnPCapabilities = 24).
+-->
+<unattend xmlns="urn:schemas-microsoft-com:unattend">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64"
+               publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS"
+               xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Description>USB selective suspend fra (AC)</Description>
+          <Path>cmd /c powercfg /setacvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>2</Order>
+          <Description>USB selective suspend fra (DC)</Description>
+          <Path>cmd /c powercfg /setdcvalueindex SCHEME_CURRENT SUB_USB USBSELECTSUSPEND 0</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>3</Order>
+          <Description>Aktiver power plan-ændringen</Description>
+          <Path>cmd /c powercfg /setactive SCHEME_CURRENT</Path>
+        </RunSynchronousCommand>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>4</Order>
+          <Description>Sluk NIC-stroemstyring (PnPCapabilities=24)</Description>
+          <Path>powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force -ErrorAction SilentlyContinue }"</Path>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+</unattend>
