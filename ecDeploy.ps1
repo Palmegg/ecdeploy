@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.20.0'
+$script:Version = '1.21.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -221,7 +221,6 @@ $script:WuDriveBusy   = $false
 # forsøg med $HyperIntervalSec imellem (IME skal nå at forsøge installationen).
 $script:HyperMaxAttempts = 4
 $script:HyperIntervalSec = 480          # 8 min mellem forsøg
-$script:HyperClearSettleSec = 120       # ikke-fejlende (og ikke pending) i så lang tid efter et forsøg = løst
 $script:HyperCare        = @{}
 $script:HyperActive      = $false       # true når post-2t hypercare-board-tilstanden kører
 $script:CedraTerminal    = $false       # true når klargøringen er endeligt afsluttet (done/failed)
@@ -912,6 +911,9 @@ $script:EcfAppNamesSynced = $false
 # Non-Win32 tracked apps (Store/M365/LOB) der detekteres lokalt pr. type:
 # array af @{ Gid; Name; Kind; Detect }. Win32 håndteres via IME-registret som før.
 $script:EcfExtraApps = @()
+# Ikke-Win32 apps der p.t. ER installeret (base-GUID). Opdateres af ExtraAppWork,
+# så "krav om installation"-gaten kan afgøre om en valgt Store/M365-app mangler.
+$script:InstalledExtraGuids = @{}
 
 # Hent app-navne (GUID -> navn) fra de trackedApps kunden har gemt i ecFleet
 # (Admin -> Applikationer) og overstyr den indbyggede liste, så board'et navngiver
@@ -955,7 +957,14 @@ function Sync-EcfAppNames {
         Write-LogLine 'ecFleet: kunne ikke hente app-navne fra server (bruger indbygget liste)' 'WARN'
     }
 }
-if ($script:EcfEnabled) { Sync-EcfAppNames }
+if ($script:EcfEnabled) {
+    Sync-EcfAppNames
+    if ($script:EcfAppNames.Count -gt 0) {
+        Write-LogLine ("Sporede apps ({0}) — alle SKAL være installeret før genstart: {1}" -f $script:EcfAppNames.Count, (($script:EcfAppNames.Values | Sort-Object) -join ', '))
+    } else {
+        Write-LogLine 'Ingen sporede apps hentet — kan ikke kræve app-installation (tjek ecFleet Admin + netværk)' 'WARN'
+    }
+}
 
 # POST a batch of checks to ecFleet on a background runspace. The server merges checks by 'key'.
 function Send-EcfReport {
@@ -1123,8 +1132,7 @@ $script:AppRetryWork = {
                         try {
                             Remove-Item $app.PSPath -Recurse -Force -ErrorAction Stop
                             $res.Deleted++
-                            $Queue.Enqueue("Hypercare: nulstillede app-status $($app.PSChildName)")
-                        } catch { $Queue.Enqueue("Hypercare: kunne ikke nulstille $($app.PSChildName): $($_.Exception.Message)") }
+                        } catch {}
                         break
                     }
                 }
@@ -1140,66 +1148,46 @@ $script:AppRetryWork = {
     return $res
 }
 
-# Opdatér hypercare-state ud fra et frisk app-snapshot og trig forfaldne retries.
-# En app tæller som et "problem" hvis den IKKE er installeret — dvs. enten FEJLET
-# ($Failed) ELLER mangler/afventer ($Pending, inkl. ukendt tilstand). Begge optages,
-# så en app der bare "mangler" (uden en decideret fejl) også blokerer genstart.
-# $Failed/$Pending = @(@{ Guid; Name }); $InstalledGuids = @('guid',...).
+# Opdatér hypercare-state. $Missing = @(@{ Guid; Name }) af VALGTE apps der IKKE er
+# installeret lige nu (fejlet, afventer ELLER helt fraværende). $Failed = delmængden
+# der er i decideret FEJL-tilstand (bruges til retry-timing under de 2 timer).
+# En app er LØST når den ikke længere står i $Missing (dvs. er blevet installeret).
 # Kaldes fra Report-EcfStatus hvert 60-sek-tick (både under og efter de 2 timer).
 function Update-HyperCareState {
-    param([object[]]$Failed, [object[]]$Pending, [string[]]$InstalledGuids)
+    param([object[]]$Missing, [object[]]$Failed, [string[]]$InstalledGuids)
     if ($script:CedraTerminal) { return }
     $now = Get-Date
-    $failedSet    = @{}; foreach ($f in @($Failed))         { if ($f.Guid) { $failedSet[$f.Guid] = $true } }
-    $pendingSet   = @{}; foreach ($p in @($Pending))        { if ($p.Guid) { $pendingSet[$p.Guid] = $true } }
-    $installedSet = @{}; foreach ($g in @($InstalledGuids)) { if ($g)      { $installedSet[$g] = $true } }
-    # "Problem" = ikke installeret (fejlet ELLER mangler). Alle optages til hypercare.
-    $problems = @(@($Failed) + @($Pending))
+    $missingSet = @{}; foreach ($m in @($Missing)) { if ($m.Guid) { $missingSet[$m.Guid] = $true } }
+    $failedSet  = @{}; foreach ($f in @($Failed))  { if ($f.Guid) { $failedSet[$f.Guid]  = $true } }
 
-    # 1) Optag ikke-installerede apps (fejlede + manglende) i hypercare.
-    foreach ($p in $problems) {
-        if (-not $p.Guid) { continue }
-        if (-not $script:HyperCare.ContainsKey($p.Guid)) {
-            $why = if ($failedSet.ContainsKey($p.Guid)) { 'fejlede' } else { 'mangler/afventer' }
-            $script:HyperCare[$p.Guid] = @{ Name = $p.Name; Attempts = 0; LastAttempt = $null; State = 'retrying'; ClearedSince = $null }
-            Write-LogLine ("Hypercare: {0} {1} — optaget til auto-retry (op til {2} forsøg)" -f $p.Name, $why, $script:HyperMaxAttempts) 'WARN'
-        } elseif ($script:HyperCare[$p.Guid].State -eq 'ok') {
-            $script:HyperCare[$p.Guid].State = 'retrying'
-            $script:HyperCare[$p.Guid].ClearedSince = $null
+    # 1) Optag valgte apps der mangler (nye) + genåbn en 'ok' der pludselig mangler igen.
+    foreach ($m in @($Missing)) {
+        if (-not $m.Guid) { continue }
+        if (-not $script:HyperCare.ContainsKey($m.Guid)) {
+            $why = if ($failedSet.ContainsKey($m.Guid)) { 'fejlede' } else { 'mangler' }
+            $script:HyperCare[$m.Guid] = @{ Name = $m.Name; Attempts = 0; LastAttempt = $null; State = 'retrying' }
+            Write-LogLine ("Hypercare: {0} {1} — optaget til auto-retry (op til {2} forsøg)" -f $m.Name, $why, $script:HyperMaxAttempts) 'WARN'
+        } elseif ($script:HyperCare[$m.Guid].State -eq 'ok') {
+            $script:HyperCare[$m.Guid].State = 'retrying'
         }
     }
-    # 2) Afgør status for hver app under retry. LØST når den vises Installed, ELLER
-    #    hverken fejler eller mangler (og ikke er midt i installation) i mindst
-    #    $HyperClearSettleSec efter et forsøg (IME efterlader ofte en geninstalleret
-    #    app UDEN Installed-post — nøglen ryddes -> "absent").
+    # 2) LØST: en sporet app der IKKE længere står som manglende = installeret -> ok.
     foreach ($kv in $script:HyperCare.GetEnumerator()) {
-        $g = $kv.Key; $h = $kv.Value
-        if ($h.State -ne 'retrying') { continue }
-        if ($installedSet.ContainsKey($g)) {
+        $h = $kv.Value
+        if ($h.State -eq 'retrying' -and -not $missingSet.ContainsKey($kv.Key)) {
             Write-LogLine ("Hypercare: {0} installeret" -f $h.Name)
-            $h.State = 'ok'; $h.ClearedSince = $null
-        } elseif ($failedSet.ContainsKey($g) -or $pendingSet.ContainsKey($g)) {
-            # Fejler stadig, eller mangler/installerer -> vent, nulstil "cleared".
-            $h.ClearedSince = $null
-        } else {
-            # Hverken installeret, fejlet eller pending — appens nøgle er "absent"
-            # (IME rydder den ofte når appen ER installeret). Har den været det længe
-            # nok, betragtes den som installeret (så den ikke hænger for evigt).
-            if (-not $h.ClearedSince) { $h.ClearedSince = $now }
-            if (($now - $h.ClearedSince).TotalSeconds -ge $script:HyperClearSettleSec) {
-                Write-LogLine ("Hypercare: {0} mangler ikke længere — betragtes som installeret" -f $h.Name)
-                $h.State = 'ok'
-            }
+            $h.State = 'ok'
         }
     }
-    # 3) Trig retries. UNDER de 2 timer: kun apps der FAKTISK fejler (rør ikke apps
-    #    der stadig installerer normalt). EFTER de 2 timer (HyperActive): også apps
-    #    der bare mangler/afventer — for da er de reelt gået i stå.
+    # 3) Trig retries. UNDER de 2 timer: kun apps der FAKTISK fejler (rør ikke apps der
+    #    stadig installerer normalt). EFTER de 2 timer (HyperActive): alle der stadig
+    #    mangler — for da er de reelt gået i stå.
     $due = @()
     foreach ($kv in $script:HyperCare.GetEnumerator()) {
         $g = $kv.Key; $h = $kv.Value
         if ($h.State -ne 'retrying' -or $h.Attempts -ge $script:HyperMaxAttempts) { continue }
-        $retriable = $failedSet.ContainsKey($g) -or ($script:HyperActive -and $pendingSet.ContainsKey($g))
+        if (-not $missingSet.ContainsKey($g)) { continue }
+        $retriable = $failedSet.ContainsKey($g) -or $script:HyperActive
         if (-not $retriable) { continue }
         if ($null -eq $h.LastAttempt -or ($now - $h.LastAttempt).TotalSeconds -ge $script:HyperIntervalSec) { $due += $g }
     }
@@ -1209,12 +1197,12 @@ function Update-HyperCareState {
         Write-LogLine ("Hypercare: forsøger geninstallation ({0})" -f $names)
         Start-BackgroundWork -Data @{ Guids = $due } -Work $script:AppRetryWork -OnComplete { param($r) }
     }
-    # 4) Apps der har opbrugt forsøgene og STADIG ikke er installeret -> endeligt fejlet.
+    # 4) Apps der har opbrugt forsøgene og STADIG mangler -> endeligt fejlet.
     foreach ($kv in $script:HyperCare.GetEnumerator()) {
         $g = $kv.Key; $h = $kv.Value
         if ($h.State -eq 'retrying' -and $h.Attempts -ge $script:HyperMaxAttempts -and
             $h.LastAttempt -and ($now - $h.LastAttempt).TotalSeconds -ge $script:HyperIntervalSec -and
-            ($failedSet.ContainsKey($g) -or $pendingSet.ContainsKey($g))) {
+            $missingSet.ContainsKey($g)) {
             $h.State = 'failed'
             Write-LogLine ("Hypercare: {0} kunne ikke installeres efter {1} forsøg" -f $h.Name, $h.Attempts) 'WARN'
         }
@@ -1330,7 +1318,6 @@ function Report-EcfStatus {
         $checks = @()
         $failedList = @()       # @{ Guid; Name } for nu-fejlede (ikke-exempt) apps
         $installedGuids = @()   # base-GUID for installerede apps
-        $pendingList = @()      # @{ Guid; Name } for apps der IKKE er installeret men ikke fejlet (I gang/afventer)
         $untracked = @()        # diagnostik: ikke-installerede apps vi IKKE genkender (GUID ikke i tabellen)
         foreach ($a in $res.Apps) {
             # Prefer a configured friendly name: derive the base GUID from the IME app id (the "_1"
@@ -1372,8 +1359,8 @@ function Report-EcfStatus {
                         $failedList += @{ Guid = $gid; Name = $name }
                     }
                 }
-                'Pending'   { if (-not $exempt) { $pendingList += @{ Guid = $gid; Name = $name } } }  # I gang/afventer
-                default     { if (-not $exempt) { $pendingList += @{ Guid = $gid; Name = $name } } }  # Ukendt tilstand men IKKE installeret -> tæl som "mangler"
+                'Pending'   { }   # I gang/afventer — fanges af "krav om installation"-tjekket nedenfor
+                default     { }   # Ukendt — fanges af "krav om installation"-tjekket nedenfor
             }
         }
         # Diagnostik (throttlet til hver 5. min): ikke-installerede apps vi IKKE
@@ -1388,11 +1375,33 @@ function Report-EcfStatus {
         # ikke også de normale app-badges (undgår redundans + countdown-churn).
         if ($checks.Count -gt 0 -and -not $script:HyperActive) { Send-EcfReport $checks }
 
-        # HYPERCARE: auto-retry af fejlede apps (per-app GRS/enforcement-nulstilling),
-        # både UNDER og EFTER de 2 timer, op til 4 forsøg. Håndterer optag, retry,
-        # opbrugte forsøg og — når HyperActive (post-2t) — board-opdatering + exit
-        # (afslut normalt hvis alt kom sig, ellers meld fejl). INGEN popup her.
-        Update-HyperCareState -Failed $failedList -Pending $pendingList -InstalledGuids $installedGuids
+        # KRAV: hver VALGT app (EcfAppNames, ikke-exempt) SKAL være installeret. Byg
+        # listen over VALGTE apps der IKKE er installeret — win32 via registret, appx
+        # via Get-AppxPackage, ikke-Win32 via ExtraApp-detektionen. Også apps HELT
+        # UDEN en IME-nøgle (aldrig forsøgt) tæller som "mangler" -> blokerer genstart.
+        $requiredMissing = @()
+        $instSet = @{}; foreach ($g in $installedGuids) { $instSet[$g] = $true }
+        $extraGuidSet = @{}; foreach ($e in @($script:EcfExtraApps)) { if ($e.Gid) { $extraGuidSet[$e.Gid] = $true } }
+        foreach ($kv in $script:EcfAppNames.GetEnumerator()) {
+            $gid = $kv.Key; $name = $kv.Value
+            $ex = $false
+            foreach ($pat in $script:EcfFailureExempt) { if ($pat -and "$name" -like "*$pat*") { $ex = $true; break } }
+            if ($ex) { continue }
+            $isInst = $false
+            if ($script:EcfAppxChecks.ContainsKey($name)) {
+                try { if (Get-AppxPackage -Name $script:EcfAppxChecks[$name] -ErrorAction SilentlyContinue) { $isInst = $true } } catch {}
+            } elseif ($extraGuidSet.ContainsKey($gid)) {
+                $isInst = $script:InstalledExtraGuids.ContainsKey($gid)
+            } else {
+                $isInst = $instSet.ContainsKey($gid)
+            }
+            if (-not $isInst) { $requiredMissing += @{ Guid = $gid; Name = $name } }
+        }
+
+        # HYPERCARE: alle manglende VALGTE apps optages + retryes (op til 4 gange).
+        # Hypercare blokerer genstart indtil ALLE valgte apps er installeret (eller
+        # en app opbruger forsøgene og meldes som endelig fejl). INGEN popup her.
+        Update-HyperCareState -Missing $requiredMissing -Failed $failedList -InstalledGuids $installedGuids
     }
 
     # Apps installed directly by CedraDeploy (e.g. Company Portal) — report from the actual appx
@@ -1415,9 +1424,14 @@ function Report-EcfStatus {
             param($res)
             if (-not $res) { return }
             $checks = @()
+            $inst = @{}
             foreach ($r in @($res)) {
-                if ($r.Installed) { $checks += @{ key = "app:$($r.Gid)"; label = "$($r.Name)"; status = 'ok'; message = '' } }
+                if ($r.Installed) {
+                    $checks += @{ key = "app:$($r.Gid)"; label = "$($r.Name)"; status = 'ok'; message = '' }
+                    if ($r.Gid) { $inst[$r.Gid] = $true }
+                }
             }
+            $script:InstalledExtraGuids = $inst   # bruges af "krav om installation"-tjekket
             if ($checks.Count -gt 0) { Send-EcfReport $checks }
         }
     }
