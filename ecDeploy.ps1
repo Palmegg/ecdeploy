@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.22.2'
+$script:Version = '1.23.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -1468,22 +1468,72 @@ function Report-EcfStatus {
         # via Get-AppxPackage, ikke-Win32 via ExtraApp-detektionen. Også apps HELT
         # UDEN en IME-nøgle (aldrig forsøgt) tæller som "mangler" -> blokerer genstart.
         $requiredMissing = @()
+        $missingWhy = @()   # diagnostik: hvorfor hver manglende app anses for manglende
         $instSet = @{}; foreach ($g in $installedGuids) { $instSet[$g] = $true }
         $extraGuidSet = @{}; foreach ($e in @($script:EcfExtraApps)) { if ($e.Gid) { $extraGuidSet[$e.Gid] = $true } }
+        # Fallback-detektion: alle DisplayNames i Uninstall-registret (begge hives + HKCU).
+        # Bruges når hverken IME eller ExtraApp fandt en win32-app — så en app der ER
+        # installeret (bare uden for Intunes tracking) også tæller som installeret.
+        $uninstNames = @()
+        foreach ($ur in @(
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+            'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall')) {
+            foreach ($k in (Get-ChildItem $ur -ErrorAction SilentlyContinue)) {
+                $dn = (Get-ItemProperty $k.PSPath -Name DisplayName -ErrorAction SilentlyContinue).DisplayName
+                if ($dn) { $uninstNames += "$dn" }
+            }
+        }
+        # Opslag base-GUID -> IME-status (Cat/kode) for de apps IME faktisk kender.
+        $imeByGid = @{}
+        foreach ($a in $res.Apps) {
+            if ("$($a.Id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+                $g2 = $matches[1].ToLower(); if (-not $imeByGid.ContainsKey($g2)) { $imeByGid[$g2] = $a }
+            }
+        }
         foreach ($kv in $script:EcfAppNames.GetEnumerator()) {
             $gid = $kv.Key; $name = $kv.Value
             $ex = $false
             foreach ($pat in $script:EcfFailureExempt) { if ($pat -and "$name" -like "*$pat*") { $ex = $true; break } }
             if ($ex) { continue }
-            $isInst = $false
+            $isInst = $false; $why = ''
             if ($script:EcfAppxChecks.ContainsKey($name)) {
                 try { if (Get-AppxPackage -Name $script:EcfAppxChecks[$name] -ErrorAction SilentlyContinue) { $isInst = $true } } catch {}
+                if (-not $isInst) { $why = ("appx-pakke '{0}' ikke fundet" -f $script:EcfAppxChecks[$name]) }
             } elseif ($extraGuidSet.ContainsKey($gid)) {
                 $isInst = $script:InstalledExtraGuids.ContainsKey($gid)
+                if (-not $isInst) {
+                    $k = ''; foreach ($e in @($script:EcfExtraApps)) { if ($e.Gid -eq $gid) { $k = "$($e.Kind)"; break } }
+                    $why = ("ikke-Win32 ({0}) — lokal detektion fandt den ikke" -f $k)
+                }
             } else {
                 $isInst = $instSet.ContainsKey($gid)
+                if (-not $isInst) {
+                    # Fallback: findes app-navnet i Uninstall-registret? (installeret uden for Intune)
+                    $uMatch = @($uninstNames | Where-Object { $_ -like "*$name*" }) | Select-Object -First 1
+                    if ($uMatch) {
+                        $isInst = $true
+                        if (-not $script:UninstLogged) { $script:UninstLogged = @{} }
+                        if (-not $script:UninstLogged.ContainsKey($gid)) {
+                            $script:UninstLogged[$gid] = $true
+                            Write-LogLine ("App '{0}' fundet i Uninstall-registret ('{1}') — tæller som installeret (ikke via Intune)" -f $name, $uMatch)
+                        }
+                    } elseif ($imeByGid.ContainsKey($gid)) {
+                        $ia = $imeByGid[$gid]
+                        $why = ("win32 — Intune melder '{0}' (kode {1}), intet Uninstall-match" -f $ia.Cat, $ia.Code)
+                    } else {
+                        $why = 'win32 — INGEN IME-nøgle og intet Uninstall-match (Intune har ikke set app''en; heller ikke lokalt installeret under dette navn)'
+                    }
+                }
             }
-            if (-not $isInst) { $requiredMissing += @{ Guid = $gid; Name = $name } }
+            if (-not $isInst) { $requiredMissing += @{ Guid = $gid; Name = $name }; $missingWhy += ("{0}: {1}" -f $name, $why) }
+        }
+        # Diagnostik (throttlet til hver 2. min): hvorfor hver krævet app mangler.
+        if ($missingWhy.Count -gt 0) {
+            if (-not $script:LastMissingWhyLog -or ((Get-Date) - $script:LastMissingWhyLog).TotalSeconds -ge 120) {
+                $script:LastMissingWhyLog = Get-Date
+                Write-LogLine ("App-krav: {0} mangler — {1}" -f $missingWhy.Count, ($missingWhy -join ' | ')) 'WARN'
+            }
         }
 
         # HYPERCARE: alle manglende VALGTE apps optages + retryes (op til 4 gange).
