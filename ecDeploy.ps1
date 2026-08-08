@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.21.0'
+$script:Version = '1.22.0'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -171,17 +171,10 @@ $script:Customers = @{
         # der matcher AGENT_API_KEY paa ecFleet-serveren. Rigtig beskyttelse = netvaerks-isolation.
         EcfBaseUrl  = 'http://10.253.100.22:5173/api'
         EcfApiKey   = 'INjAxOrFYiaPlExpIniIysUZh36pLEP0'
-        # GUID -> friendly name for Intune Win32 apps (the registry only exposes GUIDs). Keyed by the
-        # base GUID (the IME app id without any "_1" revision suffix), lowercase.
-        EcfAppNames = @{
-            '3b61435b-92b3-400b-99d9-5e710244ae7b' = '7-Zip'
-            '92680d28-18b2-47b8-9acd-21c0c35f3abf' = 'AdminRemover'
-            'e621fc1f-a00a-4e67-9d32-734e59303bc3' = 'Adobe Reader'
-            '3859ac67-a6e9-426b-a79a-368c306702bc' = 'DeviceRenamer'
-            '8d8ff2c8-9e91-464a-b2c7-ea8e92546caa' = 'Firmaportal'
-            '67391164-7e55-47cb-8ca5-5fa9116d85f8' = 'Jabra Direct'
-            '4e1fefc1-8986-48ba-ad18-d57251e23bc9' = 'Logitech Options+'
-        }
+        # De sporede apps hentes fra ecFleet (Admin -> Applikationer) via Sync-EcfAppNames
+        # og caches lokalt. INGEN hardcodet liste længere — ecFleet er den eneste kilde
+        # til hvilke apps der kræves installeret (så vi ikke kræver fx 7-Zip der ikke er valgt).
+        EcfAppNames = @{}
         # Apps installed directly by CedraDeploy (not via Intune) — checked via Get-AppxPackage by
         # friendly name instead of the IME/registry, and excluded from the Intune-app badges.
         # Map: friendly name -> appx package family name.
@@ -204,6 +197,7 @@ $script:ImeLogsPath  = Join-Path $env:ProgramData 'Microsoft\IntuneManagementExt
 $script:ImeLogFile   = Join-Path $script:ImeLogsPath 'IntuneManagementExtension.log'
 $script:LogDir       = Join-Path $env:ProgramData 'ecDeploy'
 $script:LogFile      = Join-Path $script:LogDir 'ecDeploy.log'
+$script:AppsCacheFile = Join-Path $script:LogDir 'tracked-apps.json'   # cache af ecFleet-app-listen
 
 $script:NoSleepActive = $false
 $script:SeqRunning    = $false
@@ -233,6 +227,7 @@ $script:NetFailCount       = 0
 $script:NetLastRestart     = $null      # tidspunkt for sidste kort-genstart (cooldown)
 $script:NetFailThreshold   = 2          # antal fejl-tjek i træk før genstart
 $script:NetRestartCooldownSec = 120     # min. sekunder mellem to kort-genstarter
+$script:NetAutoRestart     = $true      # auto-genstart af netkort ved forbindelsestab (top-bar toggle)
 $script:UI            = @{}
 $script:LogQueue      = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
 
@@ -339,6 +334,12 @@ $xaml = @'
                     </StackPanel>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                    <Button x:Name="BtnBarNet" Content="Auto-net: TIL" Margin="5,0" Padding="10,4" FontSize="12"
+                            Background="#1F3A24" Foreground="#CFE9D4" BorderThickness="0" Cursor="Hand"/>
+                    <Button x:Name="BtnBarHyper" Content="Start hypercare" Margin="5,0" Padding="10,4" FontSize="12" Visibility="Collapsed"
+                            Background="#4A2E12" Foreground="#F2D9B0" BorderThickness="0" Cursor="Hand"/>
+                    <Button x:Name="BtnBarKlar" Content="Meld klargjort" Margin="5,0" Padding="10,4" FontSize="12" Visibility="Collapsed"
+                            Background="#1F3A24" Foreground="#CFE9D4" BorderThickness="0" Cursor="Hand"/>
                     <Border x:Name="ChipAdmin"   CornerRadius="11" Padding="10,4" Margin="5,0" Background="#3A2A2A"><TextBlock x:Name="TxtAdmin"   Foreground="#E6E7EA" FontSize="12"/></Border>
                     <Border x:Name="ChipOnline"  CornerRadius="11" Padding="10,4" Margin="5,0" Background="#2B2C33"><TextBlock x:Name="TxtOnline"  Foreground="#E6E7EA" FontSize="12"/></Border>
                     <Border x:Name="ChipNoSleep" CornerRadius="11" Padding="10,4" Margin="5,0" Background="#2B2C33"><TextBlock x:Name="TxtNoSleep" Foreground="#E6E7EA" FontSize="12"/></Border>
@@ -549,6 +550,7 @@ $script:Window = [Windows.Markup.XamlReader]::Load($reader)
 
 foreach ($name in @(
     'LogoImg','TxtWordmark','TxtDevelopedBy','TxtAdmin','ChipAdmin','TxtOnline','ChipOnline','TxtNoSleep','ChipNoSleep','TxtVersion','BannerNoSleep',
+    'BtnBarHyper','BtnBarKlar','BtnBarNet',
     'NavAuto','NavNoSleep','NavGrs','BtnImeLogs','BtnPrograms','BtnTaskMgr','BtnUpdate','BtnViewLog',
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
@@ -745,6 +747,11 @@ function Invoke-NetWatchTick {
         $script:NetFailCount++
         Write-LogLine ("Netværk: ingen forbindelse ({0}/{1})" -f $script:NetFailCount, $script:NetFailThreshold) 'WARN'
         if ($script:NetFailCount -ge $script:NetFailThreshold) {
+            if (-not $script:NetAutoRestart) {
+                Write-LogLine 'Netværk: forbindelse tabt — auto-genstart af netkort er slået FRA (springer over)' 'WARN'
+                $script:NetFailCount = 0
+                return
+            }
             # Cooldown: giv kortet tid til at komme op igen efter en genstart.
             $now = Get-Date
             if ($script:NetLastRestart -and ($now - $script:NetLastRestart).TotalSeconds -lt $script:NetRestartCooldownSec) {
@@ -771,6 +778,23 @@ function Start-NetWatch {
     $script:NetWatchTimer.Add_Tick({ Invoke-NetWatchTick })
     $script:NetWatchTimer.Start()
     Write-LogLine ("Netværks-overvågning aktiv (tjek hver {0}s — genstarter kort efter {1} fejl i træk)" -f $iv, $script:NetFailThreshold)
+}
+
+# Top-bar toggle: slå auto-genstart af netkort til/fra. Overvågningen kører videre;
+# kun selve genstarts-handlingen slås fra (teknikeren vil måske selv styre replug).
+function Toggle-NetAutoRestart {
+    $script:NetAutoRestart = -not $script:NetAutoRestart
+    if ($script:NetAutoRestart) {
+        $script:UI.BtnBarNet.Content = 'Auto-net: TIL'
+        $script:UI.BtnBarNet.Background = '#1F3A24'
+        $script:UI.BtnBarNet.Foreground = '#CFE9D4'
+        Write-LogLine 'Auto-genstart af netkort slået TIL'
+    } else {
+        $script:UI.BtnBarNet.Content = 'Auto-net: FRA'
+        $script:UI.BtnBarNet.Background = '#3A2424'
+        $script:UI.BtnBarNet.Foreground = '#E8B9B9'
+        Write-LogLine 'Auto-genstart af netkort slået FRA' 'WARN'
+    }
 }
 #endregion
 
@@ -919,6 +943,37 @@ $script:InstalledExtraGuids = @{}
 # (Admin -> Applikationer) og overstyr den indbyggede liste, så board'et navngiver
 # præcis de apps kunden har valgt. Best-effort: beholder den indbyggede liste hvis
 # kaldet fejler eller intet er gemt. Resolves server-side ud fra maskinens serial.
+# Byg EcfAppNames (GUID->navn) + EcfExtraApps (ikke-Win32) ud fra en app-liste
+# (fra serveren eller cachen). Cacher listen ved server-hentning.
+function Set-EcfAppsFromList {
+    param($apps, [switch]$FromCache)
+    $map = @{}
+    $extra = @()
+    foreach ($a in @($apps)) {
+        if (-not $a.id -or -not $a.name) { continue }
+        $gid = "$($a.id)".ToLower()
+        if ("$($a.id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+            $gid = $matches[1].ToLower()
+        }
+        $map[$gid] = "$($a.name)"
+        $kind = if ($a.PSObject.Properties['kind'] -and $a.kind) { "$($a.kind)".ToLower() } else { 'win32' }
+        if ($kind -ne 'win32') {
+            $detect = if ($a.PSObject.Properties['detect']) { "$($a.detect)" } else { '' }
+            $extra += @{ Gid = $gid; Name = "$($a.name)"; Kind = $kind; Detect = $detect }
+        }
+    }
+    if ($map.Count -gt 0) {
+        $script:EcfAppNames  = $map
+        $script:EcfExtraApps = $extra
+        $script:EcfAppNamesSynced = $true
+        $src = if ($FromCache) { 'cache' } else { 'ecFleet' }
+        Write-LogLine ("ecFleet: {0} valgte apps ({1}) — {2} ikke-Win32" -f $map.Count, $src, $extra.Count)
+        if (-not $FromCache) {
+            try { $apps | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $script:AppsCacheFile -Encoding UTF8 } catch {}
+        }
+    }
+}
+
 function Sync-EcfAppNames {
     if (-not $script:EcfEnabled -or -not $script:DeviceSerial) { return }
     try {
@@ -926,43 +981,35 @@ function Sync-EcfAppNames {
         $headers = @{}
         if ($script:EcfApiKey) { $headers['X-Api-Key'] = $script:EcfApiKey }
         $resp = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -TimeoutSec 4
-        if ($resp -and $resp.apps) {
-            $map = @{}
-            $extra = @()
-            foreach ($a in $resp.apps) {
-                if (-not $a.id -or -not $a.name) { continue }
-                $gid = "$($a.id)".ToLower()
-                if ("$($a.id)" -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
-                    $gid = $matches[1].ToLower()
-                }
-                $map[$gid] = "$($a.name)"
-                # Kind mangler på ældre gemte apps -> antag win32 (bagudkompatibelt).
-                $kind = if ($a.PSObject.Properties['kind'] -and $a.kind) { "$($a.kind)".ToLower() } else { 'win32' }
-                if ($kind -ne 'win32') {
-                    $detect = if ($a.PSObject.Properties['detect']) { "$($a.detect)" } else { '' }
-                    $extra += @{ Gid = $gid; Name = "$($a.name)"; Kind = $kind; Detect = $detect }
-                }
-            }
-            if ($map.Count -gt 0) {
-                $script:EcfAppNames  = $map
-                $script:EcfExtraApps = $extra
-                $script:EcfAppNamesSynced = $true
-                Write-LogLine ("ecFleet: {0} app-navne hentet ({1} ikke-Win32 til lokal detektion)" -f $map.Count, $extra.Count)
-            } elseif ($resp.ok) {
-                # Serveren svarede, men kunden har ikke gemt nogen apps endnu.
-                $script:EcfAppNamesSynced = $true
-            }
+        if ($resp -and $resp.apps -and @($resp.apps).Count -gt 0) {
+            Set-EcfAppsFromList $resp.apps
+        } elseif ($resp -and $resp.ok) {
+            # Serveren svarede, men kunden har ikke gemt nogen apps endnu.
+            $script:EcfAppNamesSynced = $true
         }
     } catch {
-        Write-LogLine 'ecFleet: kunne ikke hente app-navne fra server (bruger indbygget liste)' 'WARN'
+        Write-LogLine 'ecFleet: kunne ikke hente app-navne fra server' 'WARN'
+    }
+}
+
+# Indlæs den cachede ecFleet-app-liste hvis vi endnu ikke har en (fx netværk nede
+# ved opstart). Så en maskine der har synket ÉN gang bruger den rigtige liste.
+function Load-CachedApps {
+    if ($script:EcfAppNames.Count -gt 0) { return }
+    if (Test-Path -LiteralPath $script:AppsCacheFile) {
+        try {
+            $cached = Get-Content -LiteralPath $script:AppsCacheFile -Raw | ConvertFrom-Json
+            if ($cached) { Set-EcfAppsFromList $cached -FromCache }
+        } catch {}
     }
 }
 if ($script:EcfEnabled) {
     Sync-EcfAppNames
+    if ($script:EcfAppNames.Count -eq 0) { Load-CachedApps }   # netværk nede -> brug sidste kendte liste
     if ($script:EcfAppNames.Count -gt 0) {
         Write-LogLine ("Sporede apps ({0}) — alle SKAL være installeret før genstart: {1}" -f $script:EcfAppNames.Count, (($script:EcfAppNames.Values | Sort-Object) -join ', '))
     } else {
-        Write-LogLine 'Ingen sporede apps hentet — kan ikke kræve app-installation (tjek ecFleet Admin + netværk)' 'WARN'
+        Write-LogLine 'Ingen sporede apps (hverken fra ecFleet eller cache) — kan ikke kræve app-installation (tjek ecFleet Admin + netværk)' 'WARN'
     }
 }
 
@@ -1109,6 +1156,30 @@ function Send-ManualStatus {
     Set-EcfDone
     Write-LogLine 'Manuelt meldt KLARGJORT til ecFleet (tekniker-override)'
     $script:UI.TxtManualStatus.Text = ("Meldt KLARGJORT kl. {0} — status låst." -f (Get-Date).ToString('HH:mm'))
+    $script:UI.BtnBarKlar.Visibility  = 'Collapsed'
+    $script:UI.BtnBarHyper.Visibility = 'Collapsed'
+}
+
+# Tvinger genstarts-vurderingen (2-timers-mærket) til at ske NU — som om timeren var
+# udløbet. Udfaldet er det samme som ved det rigtige mærke: mangler apps -> hypercare,
+# fejlede apps -> fejl, ellers -> afslut+genstart. Bruges af "Start hypercare"-knappen.
+function Invoke-HypercareNow {
+    if (-not $script:CedraRunning) {
+        [System.Windows.MessageBox]::Show('CedraDeploy kører ikke — der er ingen klargøring at fremskynde.', 'Start hypercare', 'OK', 'Information') | Out-Null
+        return
+    }
+    if ($script:CedraTerminal -or $script:HyperActive -or $script:CedraRestartStarted) {
+        [System.Windows.MessageBox]::Show('Genstarts-vurderingen er allerede sket (hypercare/afsluttet).', 'Start hypercare', 'OK', 'Information') | Out-Null
+        return
+    }
+    $answer = [System.Windows.MessageBox]::Show(
+        "Fremskynd genstarts-vurderingen NU (som om de 2 timer var gået)?`n`nMangler der stadig apps, går maskinen i HYPERCARE. Er alt installeret, afsluttes og genstartes den.",
+        'Start hypercare nu', 'YesNo', 'Question')
+    if ($answer -ne 'Yes') { return }
+    Write-LogLine 'Genstarts-vurderingen fremskyndet manuelt (Start hypercare-knap)' 'WARN'
+    # Sæt mærket i fortiden -> næste CedraTimer-tick (om <1 s) kører beslutningen.
+    $script:CedraRestartAt = (Get-Date).AddSeconds(-2)
+    $script:UI.BtnBarHyper.Visibility = 'Collapsed'
 }
 
 # ---------------- HYPERCARE ----------------
@@ -2140,6 +2211,8 @@ function Start-CedraFlow {
     Show-Panel 'PanelAuto' $(if ($script:Profile) { $script:Profile.Brand } else { 'CedraDeploy' })
     $script:UI.BtnStartAuto.IsEnabled = $false
     $script:UI.BtnStopAuto.IsEnabled = $true     # let the tech abort the Cedra flow
+    $script:UI.BtnBarKlar.Visibility  = 'Visible'   # top-bar: manuel "Meld klargjort"
+    $script:UI.BtnBarHyper.Visibility = 'Visible'   # top-bar: fremskynd hypercare-vurdering
     $script:UI.TxtAutoMinutes.IsEnabled = $false
     $script:UI.BarAuto.Maximum = $restartMin * 60
     Write-LogLine ("CedraDeploy startet (anti-sleep, Windows Update, GRS om {0} min, genstart om {1} min)" -f $grsMin, $restartMin)
@@ -2164,6 +2237,7 @@ function Start-CedraFlow {
             if (-not $script:CedraRestartStarted -and $now -ge $script:CedraRestartAt) {
                 $script:CedraRestartStarted = $true
                 $script:CedraTimer.Stop()
+                $script:UI.BtnBarHyper.Visibility = 'Collapsed'   # mærket er ramt — kan ikke fremskyndes igen
                 Write-LogLine 'CedraDeploy: genstarts-tidspunkt nået'
                 # FØRST nu vurderes app-status. Tre udfald ud fra hypercare-tilstanden:
                 $pending = Get-HyperPending    # apps der stadig mangler/geninstalleres
@@ -2214,6 +2288,8 @@ function Stop-CedraFlow {
     Set-KeepAwake $false
     $script:UI.BarAuto.Value = 0
     $script:UI.TxtAutoStatus.Text = 'CedraDeploy stoppet.'
+    $script:UI.BtnBarKlar.Visibility  = 'Collapsed'
+    $script:UI.BtnBarHyper.Visibility = 'Collapsed'
     Write-LogLine 'CedraDeploy stoppet af tekniker'
     Update-Chips
     Update-SequenceControls   # back to an idle, usable Auto panel
@@ -2386,6 +2462,9 @@ $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
 $script:UI.BtnStopAuto.Add_Click({ if ($script:CedraRunning) { Stop-CedraFlow } else { Stop-AutoSequence } })
 $script:UI.BtnMeldOk.Add_Click({ Send-ManualStatus })
+$script:UI.BtnBarKlar.Add_Click({ Send-ManualStatus })
+$script:UI.BtnBarHyper.Add_Click({ Invoke-HypercareNow })
+$script:UI.BtnBarNet.Add_Click({ Toggle-NetAutoRestart })
 
 $script:UI.BtnRunGrs.Add_Click({
     $answer = [System.Windows.MessageBox]::Show(
