@@ -40,7 +40,7 @@ if errorlevel 1 (echo     RESULTAT: FEJL) else (echo     RESULTAT: OK)
 echo.
 
 echo [4] NIC-stroemstyring fra (PnPCapabilities=24)
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$n=0; Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { try { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force | Out-Null; $n++ } catch {} }; Write-Host ('     RESULTAT: sat paa ' + $n + ' netvaerkskort')"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$n=0; Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { try { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force | Out-Null; $n++ } catch {} }; Write-Host ('     RESULTAT: sat paa ' + $n + ' netvaerkskort')"
 echo.
 
 echo === Verificering: begge linjer skal vise 0x00000000 ===

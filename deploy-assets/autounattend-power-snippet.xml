@@ -39,7 +39,7 @@
         <RunSynchronousCommand wcm:action="add">
           <Order>4</Order>
           <Description>Sluk NIC-stroemstyring (PnPCapabilities=24)</Description>
-          <Path>powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force -ErrorAction SilentlyContinue }"</Path>
+          <Path>powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^[0-9]{4}$' } | ForEach-Object { New-ItemProperty -Path $_.PSPath -Name PnPCapabilities -PropertyType DWord -Value 24 -Force -ErrorAction SilentlyContinue }"</Path>
         </RunSynchronousCommand>
       </RunSynchronous>
     </component>
