@@ -17,6 +17,12 @@ ind i din `autounattend.xml`. Kommandoerne kører som SYSTEM under installatione
 (specialize-passet, før OOBE). **Kræver hverken `$OEM$`-mapper eller
 SetupComplete.cmd** — den mest robuste vej.
 
+### Test det i hånden: `Test-PowerFix.cmd`
+
+Kør denne **som administrator** for at teste fix'et interaktivt — den har
+log-linjer + verificering + `pause` til sidst. **Læg den ikke på USB'en** (en
+`pause` ville hænge Windows Setup).
+
 ### Alternativ: `SetupComplete.cmd`
 
 `<USB>\sources\$OEM$\$$\Setup\Scripts\SetupComplete.cmd` → ender som
