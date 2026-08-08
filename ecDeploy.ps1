@@ -21,7 +21,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:Version = '1.22.0'
+$script:Version = '1.22.1'
 
 # Startup error trap: any terminating error is written to a log and shown in a dialog that
 # stays put, so a launch failure can't vanish with the window. Place before anything risky.
@@ -314,6 +314,29 @@ $xaml = @'
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Top-bar knapper: behold egen Background/Foreground; subtil hover (let overlay,
+             ikke WPF's standard n=r-hvide). -->
+        <Style x:Key="BarButton" TargetType="Button">
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#E6E7EA"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Grid>
+                            <Border x:Name="b" Background="{TemplateBinding Background}" CornerRadius="11"/>
+                            <Border x:Name="hov" CornerRadius="11" Background="White" Opacity="0" IsHitTestVisible="False"/>
+                            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="hov" Property="Opacity" Value="0.10"/></Trigger>
+                            <Trigger Property="IsPressed" Value="True"><Setter TargetName="hov" Property="Opacity" Value="0.18"/></Trigger>
+                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid>
@@ -334,12 +357,12 @@ $xaml = @'
                     </StackPanel>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button x:Name="BtnBarNet" Content="Auto-net: TIL" Margin="5,0" Padding="10,4" FontSize="12"
-                            Background="#1F3A24" Foreground="#CFE9D4" BorderThickness="0" Cursor="Hand"/>
-                    <Button x:Name="BtnBarHyper" Content="Start hypercare" Margin="5,0" Padding="10,4" FontSize="12" Visibility="Collapsed"
-                            Background="#4A2E12" Foreground="#F2D9B0" BorderThickness="0" Cursor="Hand"/>
-                    <Button x:Name="BtnBarKlar" Content="Meld klargjort" Margin="5,0" Padding="10,4" FontSize="12" Visibility="Collapsed"
-                            Background="#1F3A24" Foreground="#CFE9D4" BorderThickness="0" Cursor="Hand"/>
+                    <Button x:Name="BtnBarNet" Style="{StaticResource BarButton}" Content="Auto-net: TIL" Margin="5,0" Padding="10,4"
+                            Background="#1F3A24" Foreground="#CFE9D4"/>
+                    <Button x:Name="BtnBarHyper" Style="{StaticResource BarButton}" Content="Start hypercare" Margin="5,0" Padding="10,4" Visibility="Collapsed"
+                            Background="#4A2E12" Foreground="#F2D9B0"/>
+                    <Button x:Name="BtnBarKlar" Style="{StaticResource BarButton}" Content="Meld klargjort" Margin="5,0" Padding="10,4" Visibility="Collapsed"
+                            Background="#1F3A24" Foreground="#CFE9D4"/>
                     <Border x:Name="ChipAdmin"   CornerRadius="11" Padding="10,4" Margin="5,0" Background="#3A2A2A"><TextBlock x:Name="TxtAdmin"   Foreground="#E6E7EA" FontSize="12"/></Border>
                     <Border x:Name="ChipOnline"  CornerRadius="11" Padding="10,4" Margin="5,0" Background="#2B2C33"><TextBlock x:Name="TxtOnline"  Foreground="#E6E7EA" FontSize="12"/></Border>
                     <Border x:Name="ChipNoSleep" CornerRadius="11" Padding="10,4" Margin="5,0" Background="#2B2C33"><TextBlock x:Name="TxtNoSleep" Foreground="#E6E7EA" FontSize="12"/></Border>
@@ -421,14 +444,7 @@ $xaml = @'
                             <Button x:Name="BtnStartAuto" Style="{StaticResource PrimaryButton}" Content="Start sekvens"/>
                             <Button x:Name="BtnStopAuto"  Style="{StaticResource GhostButton}" Content="Stop" Margin="10,0,0,0" IsEnabled="False"/>
                         </StackPanel>
-
-                        <!-- Manuel status-override til ecFleet-boardet -->
-                        <Border Height="1" Background="{StaticResource Border}" Margin="0,18,0,12"/>
-                        <TextBlock Text="Meld status manuelt til ecFleet" Foreground="{StaticResource Text}" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                        <TextBlock Foreground="{StaticResource Muted}" TextWrapping="Wrap" Margin="0,0,0,10"
-                                   Text="Overstyr boardets status hvis du fysisk har bekræftet maskinen. Dette låser statussen — den automatiske rapportering for denne maskine stoppes, så din melding ikke bliver overskrevet."/>
-                        <TextBlock x:Name="TxtManualStatus" Foreground="{StaticResource Muted}" Margin="0,0,0,10"/>
-                        <Button x:Name="BtnMeldOk" Style="{StaticResource PrimaryButton}" Content="Meld KLARGJORT" HorizontalAlignment="Left"/>
+                        <TextBlock x:Name="TxtManualStatus" Foreground="{StaticResource Muted}" Margin="0,10,0,0"/>
                     </StackPanel>
 
                     <!-- No Sleep -->
@@ -554,7 +570,7 @@ foreach ($name in @(
     'NavAuto','NavNoSleep','NavGrs','BtnImeLogs','BtnPrograms','BtnTaskMgr','BtnUpdate','BtnViewLog',
     'TxtPanelTitle','PanelWelcome','PanelAuto','PanelNoSleep','PanelGrs',
     'TxtAutoMinutes','BarAuto','TxtAutoStatus','BtnStartAuto','BtnStopAuto',
-    'TxtManualStatus','BtnMeldOk',
+    'TxtManualStatus',
     'ChkNoSleep24','TxtNoSleepStatus','BtnToggleNoSleep',
     'TxtGrsStatus','BtnRunGrs','NavIme','PanelIme','TxtImeStatus','BtnRunIme',
     'NavHello','PanelHello','TxtHelloStatus','BtnRunHello',
@@ -2461,7 +2477,6 @@ $script:UI.BtnDiag.Add_Click({ Invoke-Diagnostics })
 $script:UI.BtnToggleNoSleep.Add_Click({ Switch-NoSleep })
 $script:UI.BtnStartAuto.Add_Click({ Start-AutoSequence })
 $script:UI.BtnStopAuto.Add_Click({ if ($script:CedraRunning) { Stop-CedraFlow } else { Stop-AutoSequence } })
-$script:UI.BtnMeldOk.Add_Click({ Send-ManualStatus })
 $script:UI.BtnBarKlar.Add_Click({ Send-ManualStatus })
 $script:UI.BtnBarHyper.Add_Click({ Invoke-HypercareNow })
 $script:UI.BtnBarNet.Add_Click({ Toggle-NetAutoRestart })
